@@ -7,7 +7,7 @@ use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use trunk_recorder_plugin::{AudioChunk, CallInfo, HostMessage, Level, State, base64, testing};
+use trunk_recorder_plugin::{AudioChunk, CallInfo, HostMessage, Level, Outcome, State, base64, testing};
 
 use crate::IcecastEndpoint;
 use crate::encode::frames;
@@ -236,7 +236,13 @@ fn the_plugin_streams_calls() {
         vec![HostMessage::Hello(testing::hello(&testing::temp_dir("icecast-endpoint"), json!({ "feeds": feeds }))), HostMessage::CallStart(call.clone())];
     m.extend((0..100).map(|_| HostMessage::Audio(AudioChunk { short_name: "sys1".into(), ..AudioChunk::new(1, 0, 101, 8000, &[1000; 160]) })));
     m.push(HostMessage::CallEnd(call));
+    let mut done = testing::call(&testing::temp_dir("icecast-endpoint"), "sys1", 101);
+    done.call.call_num = 1;
+    let path = done.path.clone();
+    m.push(HostMessage::CallConcluded(done));
     let out = testing::run::<IcecastEndpoint>(m);
+    // Counted as sent.
+    assert_eq!(out.results().iter().map(|r| (r.0.as_str(), r.1)).collect::<Vec<_>>(), [(path.as_str(), Outcome::Ok)]);
     assert!(out.ready(), "{:?}", out.messages);
     assert_eq!(out.status().unwrap().0, State::Ok, "{:?}", out.messages);
     let metrics = out.metrics();

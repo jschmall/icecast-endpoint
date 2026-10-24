@@ -7,7 +7,7 @@
 //! on the right each play one at a time, and the three play at once, the
 //! center in both ears.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::net::{Shutdown, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use trunk_recorder_plugin::{Endpoint, EndpointState, Host, Metrics, State};
+use trunk_recorder_plugin::{Endpoint, EndpointState, Host, Metrics, Outcome, State};
 
 use crate::encode::Mp3;
 use crate::icecast::{self, Method, Target};
@@ -57,6 +57,9 @@ const BACKOFF: (Duration, Duration) = (Duration::from_secs(1), Duration::from_se
 const STEADY: Duration = Duration::from_secs(60);
 /// Metrics go to the recorder's dashboard at most this often.
 const METRICS_EVERY: Duration = Duration::from_secs(10);
+/// Calls waiting for a result at most; beyond this, ones older than `RESULT_AFTER` are forgotten.
+const MAX_PENDING: usize = 1000;
+const RESULT_AFTER: Duration = Duration::from_secs(900);
 
 pub struct Feed {
     tx: Option<SyncSender<Msg>>,
@@ -129,6 +132,8 @@ fn run(s: Settings, rx: Receiver<Msg>, health: &Health, stop: &AtomicBool) {
     let title_warned = Arc::new(AtomicBool::new(false));
     let (mut left, mut right) = (Vec::new(), Vec::new());
     let mut closing = false;
+    // Calls that played, in part, while there was no stream to hear them on.
+    let mut unheard = HashSet::new();
     while !stop.load(Ordering::Relaxed) {
         let tick = Instant::now();
         loop {
@@ -205,6 +210,22 @@ fn run(s: Settings, rx: Receiver<Msg>, health: &Health, stop: &AtomicBool) {
                     retry_at = Instant::now() + backoff;
                     backoff = (backoff * 2).min(BACKOFF.1);
                 }
+            }
+        }
+        if conn.is_none() {
+            unheard.extend(mix.lanes.iter().filter_map(|l| l.playing_id()));
+        }
+        for lane in &mut mix.lanes {
+            for (id, played) in lane.take_done() {
+                let lost = unheard.remove(&id) || conn.is_none();
+                let failure = if !played {
+                    Some(format!("{name}: dropped, with more than {} s of calls waiting", max_delay.as_secs()))
+                } else if lost {
+                    Some(format!("{name}: not streamed, no connection to the server"))
+                } else {
+                    None
+                };
+                health.done(id, failure);
             }
         }
         if update_title && conn.is_some() {
@@ -334,18 +355,77 @@ struct FeedState {
     backlog: f64,
 }
 
-/// The plugin's status (the feeds that aren't streaming, if any) and, for
-/// the dashboard, each feed's figures.
+/// A recorded call on its way to a result: its path once its files are
+/// written, and what its feeds made of it.
+struct Pending {
+    path: Option<String>,
+    /// Feeds still to finish it.
+    feeds: usize,
+    failures: Vec<String>,
+    since: Instant,
+}
+
+/// The plugin's status (the feeds that aren't streaming, if any), each
+/// feed's figures for the dashboard, and what became of each call.
 #[derive(Clone)]
 pub struct Health {
     host: Host,
     feeds: Arc<Mutex<BTreeMap<String, FeedState>>>,
     reported: Arc<Mutex<Option<Instant>>>,
+    pending: Arc<Mutex<HashMap<u32, Pending>>>,
 }
 
 impl Health {
     pub fn new(host: Host) -> Health {
-        Health { host, feeds: Default::default(), reported: Default::default() }
+        Health { host, feeds: Default::default(), reported: Default::default(), pending: Default::default() }
+    }
+
+    /// A call went to `feeds` feeds: its result waits for each to finish it, and for its files.
+    pub fn routed(&self, id: u32, feeds: usize) {
+        let mut p = self.pending.lock().unwrap();
+        if p.len() >= MAX_PENDING {
+            p.retain(|_, c| c.since.elapsed() < RESULT_AFTER);
+        }
+        p.insert(id, Pending { path: None, feeds, failures: Vec::new(), since: Instant::now() });
+    }
+
+    /// A feed is done with a call: it was streamed, or `failure` says why not.
+    pub fn done(&self, id: u32, failure: Option<String>) {
+        let mut p = self.pending.lock().unwrap();
+        let Some(c) = p.get_mut(&id) else { return };
+        c.feeds = c.feeds.saturating_sub(1);
+        c.failures.extend(failure);
+        self.settle(&mut p, id);
+    }
+
+    /// A call's files are written (at `path`): its result, once its feeds are done with it.
+    pub fn concluded(&self, id: u32, path: &str) {
+        let mut p = self.pending.lock().unwrap();
+        match p.get_mut(&id) {
+            Some(c) if c.path.is_none() => {
+                c.path = Some(path.to_string());
+                self.settle(&mut p, id);
+            }
+            // Another site's copy of a call already reported.
+            _ => self.skipped(path, "another copy of this call was streamed"),
+        }
+    }
+
+    /// A call that isn't streamed, on purpose.
+    pub fn skipped(&self, path: &str, why: &str) {
+        self.host.call_result(path, Outcome::Skipped, why, "");
+    }
+
+    fn settle(&self, p: &mut HashMap<u32, Pending>, id: u32) {
+        if p.get(&id).is_some_and(|c| c.feeds == 0 && c.path.is_some()) {
+            let c = p.remove(&id).expect("a call");
+            let path = c.path.unwrap_or_default();
+            if c.failures.is_empty() {
+                self.host.call_result(&path, Outcome::Ok, "", "");
+            } else {
+                self.host.call_result(&path, Outcome::Failed, c.failures.join("; "), "");
+            }
+        }
     }
 
     fn add(&self, name: &str) {
@@ -698,6 +778,52 @@ mod tests {
         let c = server.wait(|c| c.iter().any(|c| c.head.contains("song=Right")));
         feed.finish(soon());
         assert!(c.iter().any(|c| c.head.contains("song=Right")), "the right call's title didn't follow");
+    }
+
+    #[test]
+    fn a_result_once_the_feeds_are_done_and_the_files_written() {
+        let (host, captured) = testing::capture();
+        let h = Health::new(host);
+        // Files first, then the feeds.
+        h.routed(1, 2);
+        h.concluded(1, "sys/1");
+        h.done(1, None);
+        assert!(captured.output().results().is_empty(), "one feed still playing it");
+        h.done(1, None);
+        // Feeds first, then the files; one feed failed.
+        h.routed(2, 2);
+        h.done(2, None);
+        h.done(2, Some("B: dropped".into()));
+        h.concluded(2, "sys/2");
+        // Concluded again (another site's copy), and a call never routed.
+        h.concluded(2, "sys/2b");
+        h.skipped("sys/3", "not on any feed");
+        let r: Vec<(String, Outcome, String)> = captured.output().results().into_iter().map(|(p, o, m, _)| (p, o, m)).collect();
+        assert_eq!(
+            r,
+            [
+                ("sys/1".into(), Outcome::Ok, String::new()),
+                ("sys/2".into(), Outcome::Failed, "B: dropped".into()),
+                ("sys/2b".into(), Outcome::Skipped, "another copy of this call was streamed".into()),
+                ("sys/3".into(), Outcome::Skipped, "not on any feed".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_call_played_while_the_server_is_down_failed() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let (host, captured) = testing::capture();
+        let health = Health::new(host);
+        let feed = Feed::start(settings(port), health.clone()).unwrap();
+        health.routed(1, 1);
+        health.concluded(1, "sys/1");
+        feed.send(Msg::Start { id: 1, title: String::new(), pan: Pan::Center });
+        feed.send(Msg::Audio { id: 1, rate: 8000, samples: tone(800) });
+        feed.send(Msg::End { id: 1 });
+        feed.finish(soon());
+        let r = captured.output().results();
+        assert_eq!((r[0].1, r[0].2.contains("no connection")), (Outcome::Failed, true), "{r:?}");
     }
 
     #[test]

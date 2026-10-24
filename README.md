@@ -104,6 +104,25 @@ software, you can keep the bitrate and sample rate it used.
 A stereo feed may also need to be set up as stereo on Broadcastify's side.
 Check your feed's settings there before you switch an existing mono feed.
 
+## Sent, failed and skipped
+
+The plugin's health on the **Plugins** page counts each recorded call, as it
+does for upload plugins, though a feed is one continuous stream:
+
+| Count | The call |
+|---|---|
+| Sent | Played in full on every feed it's on, while the feed was connected. |
+| Failed | Dropped because more than the Longest delay was waiting, or played while the feed couldn't reach the server. The message says which feed, and why. |
+| Skipped | On no feed (its system or talkgroup isn't one a feed plays), encrypted, or not heard live, such as a call recorded before the plugin started. |
+
+A call is counted once it has played, which for a call waiting behind others
+can be a little after it was recorded. A call on two feeds counts once. On a
+busy system most calls are skipped: only the talkgroups your feeds play are
+sent.
+
+The card also shows **callsPlayed**, **callsDropped**, **chunksDropped** and
+**backlogSeconds** (how far behind live the busiest feed is).
+
 ## When something's wrong
 
 The plugin's card, and the recorder's log, say what's wrong:

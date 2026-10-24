@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use trunk_recorder_plugin::{AudioChunk, CallInfo, Host, Manifest, Plugin, Setup, TalkgroupFilter, topic};
+use trunk_recorder_plugin::{AudioChunk, CallInfo, ConcludedCall, Host, Manifest, Plugin, Setup, TalkgroupFilter, topic};
 
 use encode::Mp3;
 use feed::{Feed, Health, Msg, Pan};
@@ -202,6 +202,19 @@ impl Route {
 /// Calls tracked at most; beyond this, ones not heard from in a while are forgotten.
 const MAX_TRACKED: usize = 1000;
 const FORGET_AFTER: Duration = Duration::from_secs(600);
+/// Another site's copy of a call started within this many seconds of it.
+const TWIN_WITHIN: f64 = 5.0;
+
+/// Which feeds a call went to, kept until its files are written (`call.concluded`).
+struct Routed {
+    short_name: String,
+    talkgroup: u32,
+    /// Unix seconds.
+    start: f64,
+    feeds: usize,
+    encrypted: bool,
+    at: Instant,
+}
 
 struct IcecastEndpoint {
     routes: Vec<Route>,
@@ -209,6 +222,9 @@ struct IcecastEndpoint {
     calls: HashMap<u32, CallInfo>,
     /// The calls routed, by id: the feeds playing each (maybe none), and when last heard.
     playing: HashMap<u32, (Vec<usize>, Instant)>,
+    /// The calls routed, until their files are written.
+    routed: HashMap<u32, Routed>,
+    health: Health,
 }
 
 impl Plugin for IcecastEndpoint {
@@ -218,7 +234,7 @@ impl Plugin for IcecastEndpoint {
     fn manifest() -> Manifest {
         Manifest {
             name: "Icecast Endpoint".into(),
-            subscribe: vec![topic::AUDIO.into(), topic::CALL_START.into(), topic::CALL_END.into()],
+            subscribe: vec![topic::AUDIO.into(), topic::CALL_START.into(), topic::CALL_END.into(), topic::CALL_CONCLUDED.into()],
             // The id, version, description, … come from Cargo.toml.
             ..trunk_recorder_plugin::manifest!()
         }
@@ -293,7 +309,7 @@ impl Plugin for IcecastEndpoint {
             let feed = Feed::start(settings, health.clone()).map_err(|e| format!("{which}: {e}"))?;
             routes.push(Route { feed, system: f.system.clone(), filter, left, right, only: only.map(String::from), not: not.clone() });
         }
-        Ok(IcecastEndpoint { routes, calls: HashMap::new(), playing: HashMap::new() })
+        Ok(IcecastEndpoint { routes, calls: HashMap::new(), playing: HashMap::new(), routed: HashMap::new(), health })
     }
 
     fn call_start(&mut self, call: CallInfo) {
@@ -301,7 +317,7 @@ impl Plugin for IcecastEndpoint {
         // A call not recorded here has no audio of its own; another site's copy may,
         // and is routed when its audio comes (as this call).
         if call.recording {
-            self.route(call.id, &call.short_name, &talkgroups(&call), title(&call), skip(&call));
+            self.route(call.id, &call.short_name, &talkgroups(&call), title(&call), skip(&call), call.start_time);
         }
         self.calls.insert(call.id, call);
     }
@@ -315,11 +331,11 @@ impl Plugin for IcecastEndpoint {
             self.calls.values().find(|c| c.short_name == chunk.short_name && c.talkgroup == chunk.talkgroup).map_or(chunk.call_id, |c| c.id)
         };
         if !self.playing.contains_key(&id) {
-            let (tgs, t, s) = match self.calls.get(&id) {
-                Some(c) => (talkgroups(c), title(c), skip(c)),
-                None => (vec![chunk.talkgroup], format!("Talkgroup {}", chunk.talkgroup), false),
+            let (tgs, t, s, start) = match self.calls.get(&id) {
+                Some(c) => (talkgroups(c), title(c), skip(c), c.start_time),
+                None => (vec![chunk.talkgroup], format!("Talkgroup {}", chunk.talkgroup), false, unix_now()),
             };
-            self.route(id, &chunk.short_name, &tgs, t, s);
+            self.route(id, &chunk.short_name, &tgs, t, s, start);
         }
         let Some((routes, heard)) = self.playing.get_mut(&id) else { return };
         *heard = Instant::now();
@@ -341,6 +357,27 @@ impl Plugin for IcecastEndpoint {
         }
     }
 
+    /// A recorded call's files are written: what became of it goes to the recorder's counts.
+    fn call_concluded(&mut self, c: ConcludedCall) {
+        let r = &c.call;
+        let id = u32::try_from(r.call_num).ok().filter(|id| self.routed.get(id).is_some_and(|d| d.short_name == r.short_name));
+        // Another site's copy of the call: the same system and talkgroup, at about the same time.
+        let id = id.or_else(|| {
+            self.routed
+                .iter()
+                .filter(|(_, d)| d.short_name == r.short_name && d.talkgroup == r.talkgroup && (d.start - r.start_time as f64).abs() <= TWIN_WITHIN)
+                .min_by(|a, b| (a.1.start - r.start_time as f64).abs().total_cmp(&(b.1.start - r.start_time as f64).abs()))
+                .map(|(id, _)| *id)
+        });
+        // Each call's files come once: a later copy isn't matched to it.
+        match id.and_then(|id| self.routed.remove(&id).map(|d| (id, d))) {
+            None => self.health.skipped(&c.path, "not heard live (the plugin streams calls as they're recorded)"),
+            Some((_, d)) if d.encrypted => self.health.skipped(&c.path, "encrypted"),
+            Some((_, d)) if d.feeds == 0 => self.health.skipped(&c.path, "not on any feed"),
+            Some((id, _)) => self.health.concluded(id, &c.path),
+        }
+    }
+
     fn shutdown(&mut self, grace: Duration) {
         let deadline = Instant::now() + grace;
         for r in &mut self.routes {
@@ -354,11 +391,17 @@ impl Plugin for IcecastEndpoint {
 
 impl IcecastEndpoint {
     /// Start a call on the feeds that play it, and remember which.
-    fn route(&mut self, id: u32, short_name: &str, talkgroups: &[u32], title: String, skip: bool) {
+    fn route(&mut self, id: u32, short_name: &str, talkgroups: &[u32], title: String, skip: bool, start: f64) {
         if self.playing.contains_key(&id) {
             return;
         }
         let routes: Vec<usize> = if skip { Vec::new() } else { (0..self.routes.len()).filter(|&i| self.routes[i].wants(short_name, talkgroups)).collect() };
+        if !routes.is_empty() {
+            self.health.routed(id, routes.len());
+        }
+        let talkgroup = talkgroups.first().copied().unwrap_or_default();
+        let routed = Routed { short_name: short_name.to_string(), talkgroup, start, feeds: routes.len(), encrypted: skip, at: Instant::now() };
+        self.routed.insert(id, routed);
         for &r in &routes {
             let pan = pan(&self.routes[r].left, &self.routes[r].right, talkgroups);
             self.routes[r].feed.send(Msg::Start { id, title: title.clone(), pan });
@@ -366,8 +409,12 @@ impl IcecastEndpoint {
         self.playing.insert(id, (routes, Instant::now()));
     }
 
-    /// Calls whose end never came (the recorder drops events for a plugin that falls behind).
+    /// Calls whose end never came (the recorder drops events for a plugin that falls behind),
+    /// and calls whose files never came (not recorded after all).
     fn forget_old(&mut self) {
+        if self.routed.len() >= MAX_TRACKED {
+            self.routed.retain(|_, d| d.at.elapsed() < FORGET_AFTER);
+        }
         if self.calls.len() + self.playing.len() < MAX_TRACKED {
             return;
         }
@@ -464,6 +511,10 @@ fn title(c: &CallInfo) -> String {
     }
 }
 
+fn unix_now() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
+}
+
 /// Where a call is heard: as the first of its talkgroups on a side says (one on both is in the center).
 fn pan(left: &TalkgroupFilter, right: &TalkgroupFilter, talkgroups: &[u32]) -> Pan {
     let on = |f: &TalkgroupFilter, t| !f.is_empty() && f.passes(t);
@@ -492,10 +543,33 @@ mod tests {
     use super::*;
     use crate::icecast::fake;
     use serde_json::{Value, json};
-    use trunk_recorder_plugin::{EXIT_CONFIG, HostMessage, SystemInfo, testing};
+    use trunk_recorder_plugin::{EXIT_CONFIG, HostMessage, Outcome, SystemInfo, testing};
 
     fn call(id: u32, tg: u32) -> CallInfo {
-        CallInfo { id, short_name: "sys1".into(), talkgroup: tg, talkgroup_tag: format!("TG {tg}"), recording: true, units: vec![1234], ..Default::default() }
+        CallInfo {
+            id,
+            short_name: "sys1".into(),
+            talkgroup: tg,
+            talkgroup_tag: format!("TG {tg}"),
+            recording: true,
+            units: vec![1234],
+            start_time: 1_700_000_000.0 + id as f64,
+            ..Default::default()
+        }
+    }
+
+    /// Its files are written, as `call_num` (another site's copy may have another).
+    fn concluded(c: &CallInfo, call_num: u32) -> HostMessage {
+        let mut k = testing::call(&testing::temp_dir("icecast-endpoint"), &c.short_name, c.talkgroup);
+        (k.path, k.call.call_num, k.call.start_time) = (format!("sys1/{call_num}"), call_num as u64, c.start_time as i64);
+        HostMessage::CallConcluded(k)
+    }
+
+    /// What became of each call: path, and outcome.
+    fn results(out: &testing::Output) -> Vec<(String, Outcome)> {
+        let mut r: Vec<(String, Outcome)> = out.results().into_iter().map(|(p, o, _, _)| (p, o)).collect();
+        r.sort_by(|a, b| a.0.cmp(&b.0));
+        r
     }
 
     /// 0.2 s of a call's audio, in the recorder's 20 ms chunks.
@@ -580,7 +654,7 @@ mod tests {
     #[test]
     fn the_manifest() {
         let m = trunk_recorder_plugin::describe::<IcecastEndpoint>();
-        assert_eq!(m.subscribe, ["audio", "call.start", "call.end"]);
+        assert_eq!(m.subscribe, ["audio", "call.start", "call.end", "call.concluded"]);
         assert!(m.system_config.is_none());
     }
 
@@ -834,6 +908,98 @@ mod tests {
         assert_eq!(played(&out), 2);
         assert!(all.wait(|c| c.first().is_some_and(|c| c.closed))[0].body.len() > 100);
         assert!(own.wait(|c| c.first().is_some_and(|c| c.closed))[0].body.len() > 100);
+    }
+
+    #[test]
+    fn each_call_is_counted_sent_or_skipped() {
+        let server = fake::Server::ok();
+        let mut m = vec![hello(json!([feed(server.port, json!({ "talkgroups": ["101"] }))]))];
+        let (sent, other) = (call(1, 101), call(2, 202));
+        let mut encrypted = call(3, 101);
+        encrypted.encrypted = true;
+        for c in [&sent, &other, &encrypted] {
+            m.extend(whole(c.clone()));
+            m.push(concluded(c, c.id));
+        }
+        // A call the plugin never heard live (it started after the call did).
+        m.push(concluded(&call(4, 101), 4));
+        let out = run(m);
+        assert_eq!(
+            results(&out),
+            [("sys1/1".into(), Outcome::Ok), ("sys1/2".into(), Outcome::Skipped), ("sys1/3".into(), Outcome::Skipped), ("sys1/4".into(), Outcome::Skipped)]
+        );
+        let mut why: Vec<(String, String)> = out.results().into_iter().map(|r| (r.0, r.2)).collect();
+        why.sort();
+        let why: Vec<&str> = why.iter().map(|w| w.1.as_str()).collect();
+        assert_eq!(why, ["", "not on any feed", "encrypted", "not heard live (the plugin streams calls as they're recorded)"]);
+    }
+
+    #[test]
+    fn a_call_waiting_to_play_is_counted_once_it_has() {
+        let server = fake::Server::ok();
+        let mut m = vec![hello(json!([feed(server.port, json!({}))]))];
+        let (first, second) = (call(1, 101), call(2, 202));
+        m.push(HostMessage::CallStart(first.clone()));
+        m.push(HostMessage::CallStart(second.clone()));
+        m.extend(audio(1, 101));
+        m.extend(audio(2, 202));
+        m.push(HostMessage::CallEnd(first.clone()));
+        m.push(HostMessage::CallEnd(second.clone()));
+        // Both are written long before the second plays; it's counted at shutdown, as it plays.
+        m.push(concluded(&first, 1));
+        m.push(concluded(&second, 2));
+        assert_eq!(results(&run(m)), [("sys1/1".into(), Outcome::Ok), ("sys1/2".into(), Outcome::Ok)]);
+    }
+
+    #[test]
+    fn another_sites_copy_is_counted_as_the_call() {
+        let server = fake::Server::ok();
+        let c = call(1, 101);
+        let mut m = vec![hello(json!([feed(server.port, json!({}))]))];
+        m.extend(whole(c.clone()));
+        // Concluded as another site's copy, with another number.
+        m.push(concluded(&c, 77));
+        assert_eq!(results(&run(m)), [("sys1/77".into(), Outcome::Ok)]);
+    }
+
+    #[test]
+    fn a_call_on_two_feeds_is_counted_once() {
+        let (a, b) = (fake::Server::ok(), fake::Server::ok());
+        let c = call(1, 101);
+        let mut m = vec![hello(json!([feed(a.port, json!({})), feed(b.port, json!({ "name": "Other" }))]))];
+        m.extend(whole(c.clone()));
+        m.push(concluded(&c, 1));
+        assert_eq!(results(&run(m)), [("sys1/1".into(), Outcome::Ok)]);
+    }
+
+    #[test]
+    fn calls_dropped_or_not_streamed_failed() {
+        // Dropped: more waiting than the longest delay (5 s) allows.
+        let server = fake::Server::ok();
+        let (first, second) = (call(1, 101), call(2, 202));
+        let mut m = vec![hello(json!([feed(server.port, json!({ "maxDelaySeconds": 5 }))]))];
+        m.push(HostMessage::CallStart(first.clone()));
+        m.push(HostMessage::CallStart(second.clone()));
+        m.extend(audio(1, 101));
+        // 6 s of the second, waiting behind the first.
+        m.extend((0..300).map(|_| HostMessage::Audio(AudioChunk { short_name: "sys1".into(), ..AudioChunk::new(2, 0, 202, 8000, &[1000; 160]) })));
+        for c in [&first, &second] {
+            m.push(HostMessage::CallEnd(c.clone()));
+            m.push(concluded(c, c.id));
+        }
+        let out = run(m);
+        assert_eq!(results(&out), [("sys1/1".into(), Outcome::Ok), ("sys1/2".into(), Outcome::Failed)]);
+        assert!(out.results().iter().any(|r| r.2.contains("dropped, with more than 5 s of calls waiting")), "{:?}", out.results());
+
+        // Not streamed: the server is down.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let c = call(1, 101);
+        let mut m = vec![hello(json!([feed(port, json!({}))]))];
+        m.extend(whole(c.clone()));
+        m.push(concluded(&c, 1));
+        let out = run(m);
+        assert_eq!(results(&out), [("sys1/1".into(), Outcome::Failed)]);
+        assert!(out.results()[0].2.contains("not streamed, no connection to the server"), "{:?}", out.results());
     }
 
     #[test]

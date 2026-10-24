@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.4.0]
+
+Sent, failed and skipped counts for each call on the Plugins page.
+
+### Added
+
+- The plugin reports what became of each recorded call, so the recorder's health page counts calls
+  sent, failed and skipped, as it does for upload plugins:
+  - **Sent:** played in full on every feed it's on, while the feed was connected.
+  - **Failed:** dropped because more than the Longest delay was waiting, or played while the feed
+    couldn't reach the server. The message names the feed and the reason.
+  - **Skipped:** on no feed (a system or talkgroup no feed plays), encrypted, or not heard live
+    (recorded before the plugin started, or replayed with `trunk-pro plugin run`).
+- A call is counted once it has played, so a call waiting behind others counts a little after it's
+  recorded. A call on two feeds counts once. A call heard on several sites counts as the copy the
+  recorder kept.
+
+### Changed
+
+- The plugin now also subscribes to `call.concluded`, to know each recorded call's files. It asks
+  for no extra audio formats, so the recorder does no extra work for it.
+
+### Upgrading
+
+- Nothing to change: there are no new settings.
+
 ## [0.3.0]
 
 A volume setting, steadier audio, and corrected Broadcastify advice.

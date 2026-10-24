@@ -47,6 +47,8 @@ pub struct Scheduler {
     gap_left: usize,
     played: u64,
     dropped: u64,
+    /// Calls finished since asked: played (true) or dropped.
+    done: Vec<(u32, bool)>,
 }
 
 impl Scheduler {
@@ -62,6 +64,7 @@ impl Scheduler {
             gap_left: 0,
             played: 0,
             dropped: 0,
+            done: Vec::new(),
         }
     }
 
@@ -142,6 +145,7 @@ impl Scheduler {
                 let call = self.calls.pop_front().expect("a call");
                 self.finish(call.id);
                 self.played += 1;
+                self.done.push((call.id, true));
                 self.gap_left = self.gap;
                 continue;
             }
@@ -154,6 +158,16 @@ impl Scheduler {
     /// Whether the call is here, waiting, playing or finished.
     pub fn knows(&self, id: u32) -> bool {
         self.calls.iter().any(|c| c.id == id) || self.finished.contains(&id)
+    }
+
+    /// The call playing, once it has begun.
+    pub fn playing_id(&self) -> Option<u32> {
+        self.calls.front().filter(|c| c.started).map(|c| c.id)
+    }
+
+    /// The calls finished since last asked: played (true), or dropped to keep the delay down.
+    pub fn take_done(&mut self) -> Vec<(u32, bool)> {
+        std::mem::take(&mut self.done)
     }
 
     /// The title of the call playing, if one is.
@@ -191,6 +205,7 @@ impl Scheduler {
         if let Some(c) = self.calls.remove(1) {
             self.finish(c.id);
             self.dropped += 1;
+            self.done.push((c.id, false));
         }
     }
 
@@ -405,6 +420,26 @@ mod tests {
         assert_eq!(s.backlog(), 0);
         pull(&mut s, 1, t + PREFILL);
         assert_eq!(s.counts(), (2, 0));
+    }
+
+    #[test]
+    fn says_which_calls_it_finished_and_how() {
+        let mut s = Scheduler::new(RATE, Duration::from_secs(1));
+        let t = Instant::now();
+        for id in 1..=3 {
+            s.start(id, String::new(), t);
+        }
+        s.audio(1, RATE, &[1; 10000], t);
+        assert_eq!(s.playing_id(), None, "not begun");
+        s.audio(2, RATE, &[2; 10000], t);
+        s.audio(3, RATE, &[3; 10000], t);
+        assert_eq!(s.take_done(), [(2, false)]);
+        s.end_all();
+        pull(&mut s, 5000, t);
+        assert_eq!(s.playing_id(), Some(1));
+        pull(&mut s, 20000 + gap(), t);
+        assert_eq!(s.take_done(), [(1, true), (3, true)]);
+        assert!(s.take_done().is_empty());
     }
 
     #[test]
