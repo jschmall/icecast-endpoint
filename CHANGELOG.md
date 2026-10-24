@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.3.0]
+
+A volume setting, steadier audio, and corrected Broadcastify advice.
+
+### Added
+
+- **Volume**, a new setting on each feed: how loud the calls play, from 0.1 to 10. 1 plays them as
+  recorded (the default, and what earlier versions did), 2 twice as loud, 0.5 half. On a stereo
+  feed it applies to both sides. Loud parts are clipped.
+
+### Changed
+
+- Each call now waits for 150 ms of its audio (or 150 ms after its first audio) before it plays.
+  Audio that reaches the plugin a little late no longer leaves short silences inside a call; before,
+  a call could break up for a few tens of milliseconds near its start. Calls start 150 ms later.
+- The README and the settings form say what Broadcastify *recommends* (16 kbps mono at 22050 Hz, or
+  32 kbps for stereo) instead of what it requires: its servers take higher settings too. The README
+  suggests a Longest delay of 10 to 15 seconds for a feed meant to sound live.
+
+### Fixed
+
+- Stopping the plugin while a call was still going, with another call waiting behind it, could make
+  the plugin send up to minutes of silence before stopping, or run past the time the recorder
+  allows and be killed. Now everything waiting plays, and the stream closes.
+
+### Upgrading
+
+- Nothing to change: Volume starts at 1, and feeds sound as before apart from the 150 ms.
+
 ## [0.2.0]
 
 Stereo feeds, with talkgroups panned left and right.
@@ -18,7 +47,7 @@ Stereo feeds, with talkgroups panned left and right.
   play the rest in the center too. A talkgroup on both sides plays in the center, and Leave out
   talkgroups still wins over everything.
 - Stereo is true stereo (left and right encoded separately), not joint stereo, which Broadcastify
-  doesn't allow.
+  recommends against.
 
 ### Changed
 
@@ -30,7 +59,7 @@ Stereo feeds, with talkgroups panned left and right.
 ### Upgrading
 
 - Nothing to change: feeds without talkgroups on a side stay mono, and stream exactly as in 0.1.0.
-- Before making a Broadcastify feed stereo, set Bitrate to 32 (Broadcastify's stereo bitrate) and
+- Before making a Broadcastify feed stereo, set Bitrate to 32 (Broadcastify's recommended stereo bitrate) and
   check that the feed is set up as stereo on Broadcastify's side.
 
 ## [0.1.0]

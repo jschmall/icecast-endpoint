@@ -39,7 +39,7 @@ fn target(mount: &str, protocol: Protocol) -> Target {
 
 fn start(t: Target, update_title: bool) -> (Feed, testing::Captured) {
     let (host, captured) = testing::capture();
-    let s = Settings { name: format!("Live test ({t})"), target: t, max_delay: Duration::from_secs(60), update_title };
+    let s = Settings { name: format!("Live test ({t})"), target: t, max_delay: Duration::from_secs(60), update_title, volume: 1.0 };
     (Feed::start(s, Health::new(host)).unwrap(), captured)
 }
 

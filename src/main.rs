@@ -67,14 +67,19 @@ struct FeedConfig {
     protocol: Protocol,
     /// Bitrate (kbps)
     ///
-    /// Broadcastify feeds are 16 kbps (32 in stereo). Other MP3 bitrates: 8, 24, 32, 40, 48, 64, 80, 96, 112, 128.
+    /// Broadcastify recommends 16 kbps (32 in stereo). Other MP3 bitrates: 8, 24, 32, 40, 48, 64, 80, 96, 112, 128.
     #[schemars(range(min = 8, max = 320))]
     bitrate: u32,
     /// Sample rate (Hz)
     ///
-    /// Broadcastify feeds are 22050 Hz. Other MP3 rates: 16000, 24000, 32000, 44100, 48000.
+    /// Broadcastify recommends 22050 Hz. Other MP3 rates: 16000, 24000, 32000, 44100, 48000.
     #[schemars(range(min = 8000, max = 48000))]
     sample_rate: u32,
+    /// Volume
+    ///
+    /// How loud to play the calls: 1 is as recorded, 2 twice as loud, 0.5 half. Loud parts are clipped.
+    #[schemars(range(min = 0.1, max = 10.0))]
+    volume: f64,
     /// System
     ///
     /// The system whose calls this feed plays. Leave it empty for every system.
@@ -92,7 +97,7 @@ struct FeedConfig {
     exclude_talkgroups: Vec<String>,
     /// Talkgroups on the left
     ///
-    /// Talkgroups heard in the left ear, written the same way. Any here or on the right makes the feed stereo (Broadcastify stereo feeds are 32 kbps).
+    /// Talkgroups heard in the left ear, written the same way. Any here or on the right makes the feed stereo (Broadcastify recommends 32 kbps for stereo).
     #[serde(deserialize_with = "trunk_recorder_plugin::filter::patterns")]
     left_talkgroups: Vec<String>,
     /// Talkgroups on the right
@@ -138,6 +143,7 @@ impl Default for FeedConfig {
             protocol: Protocol::Auto,
             bitrate: 16,
             sample_rate: 22050,
+            volume: 1.0,
             system: String::new(),
             talkgroups: Vec::new(),
             exclude_talkgroups: Vec::new(),
@@ -275,8 +281,15 @@ impl Plugin for IcecastEndpoint {
                 }
             }
             let channels = if f.stereo() { "stereo" } else { "mono" };
-            host.info(format!("feed {name}: {tgs}{of}{sides}, {} kbps {channels} at {} Hz", f.bitrate, f.sample_rate));
-            let settings = feed::Settings { target, name, max_delay: Duration::from_secs(f.max_delay_seconds as u64), update_title: f.update_title };
+            let volume = if f.volume == 1.0 { String::new() } else { format!(", volume ×{}", f.volume) };
+            host.info(format!("feed {name}: {tgs}{of}{sides}, {} kbps {channels} at {} Hz{volume}", f.bitrate, f.sample_rate));
+            let settings = feed::Settings {
+                target,
+                name,
+                max_delay: Duration::from_secs(f.max_delay_seconds as u64),
+                update_title: f.update_title,
+                volume: f.volume as f32,
+            };
             let feed = Feed::start(settings, health.clone()).map_err(|e| format!("{which}: {e}"))?;
             routes.push(Route { feed, system: f.system.clone(), filter, left, right, only: only.map(String::from), not: not.clone() });
         }
@@ -400,6 +413,9 @@ impl FeedConfig {
         }
         if self.password.is_empty() {
             return Err("add the mount's source password".into());
+        }
+        if !(0.1..=10.0).contains(&self.volume) {
+            return Err(format!("the volume is {}; make it from 0.1 to 10 (1 is as recorded)", self.volume));
         }
         if !(5..=600).contains(&self.max_delay_seconds) {
             return Err(format!("the longest delay is {} seconds; make it from 5 to 600", self.max_delay_seconds));
@@ -531,6 +547,7 @@ mod tests {
                 "protocol",
                 "bitrate",
                 "sampleRate",
+                "volume",
                 "system",
                 "talkgroups",
                 "excludeTalkgroups",
@@ -553,6 +570,8 @@ mod tests {
         assert_eq!(p["port"]["default"], 80);
         assert_eq!(p["username"]["default"], "source");
         assert_eq!(p["maxDelaySeconds"]["default"], 60);
+        assert_eq!(p["volume"]["default"], 1.0);
+        assert_eq!((p["volume"]["minimum"].as_f64(), p["volume"]["maximum"].as_f64()), (Some(0.1), Some(10.0)));
         assert_eq!(p["leftTalkgroups"]["default"], json!([]));
         assert_eq!(p["rightTalkgroups"]["type"], "array");
         assert_eq!(f["required"], json!(["server", "mount", "password"]));
@@ -578,6 +597,8 @@ mod tests {
             (json!([feed(8000, json!({ "bitrate": 17 }))]), "17 kbps"),
             (json!([feed(8000, json!({ "sampleRate": 11000 }))]), "11000"),
             (json!([feed(8000, json!({ "maxDelaySeconds": 1 }))]), "delay"),
+            (json!([feed(8000, json!({ "volume": 0 }))]), "volume"),
+            (json!([feed(8000, json!({ "volume": 11 }))]), "volume"),
             (json!([feed(8000, json!({})), feed(8000, json!({ "name": "Again", "mount": "feed" }))]), "same mount"),
         ];
         for (feeds, says) in cases {
@@ -632,6 +653,16 @@ mod tests {
         let head = &server.wait(|c| !c.is_empty())[0].head;
         assert!(head.contains("ice-audio-info: channels=2;samplerate=22050;bitrate=32\r\n"), "{head}");
         assert!(out.logs().iter().any(|(_, l)| l.contains("101 on the left, 32 kbps stereo")), "{:?}", out.logs());
+    }
+
+    #[test]
+    fn the_volume_is_logged_when_changed() {
+        let server = fake::Server::ok();
+        let out = run(vec![hello(json!([feed(server.port, json!({ "volume": 3.0 }))]))]);
+        assert!(out.ready(), "{:?}", out.messages);
+        assert!(out.logs().iter().any(|(_, l)| l.ends_with("22050 Hz, volume ×3")), "{:?}", out.logs());
+        let out = run(vec![hello(json!([feed(server.port, json!({}))]))]);
+        assert!(out.logs().iter().any(|(_, l)| l.ends_with("22050 Hz")), "{:?}", out.logs());
     }
 
     #[test]

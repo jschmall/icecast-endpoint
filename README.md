@@ -54,8 +54,9 @@ filled in.
 | Username | Leave it as `source` unless your server says otherwise. |
 | Password | The mount's source password. |
 | Protocol | **Automatic** works with any Icecast server. Choose PUT or SOURCE only if your server needs one of them. |
-| Bitrate (kbps) | Default: 16, what Broadcastify requires for a mono feed (32 for stereo). Other choices: 8, 24, 32, 40, 48, 64, 80, 96, 112 and 128. |
-| Sample rate (Hz) | Default: 22050, what Broadcastify requires. Other choices: 16000, 24000, 32000, 44100 and 48000. |
+| Bitrate (kbps) | Default: 16, what Broadcastify recommends for a mono feed (32 for stereo). Other choices: 8, 24, 32, 40, 48, 64, 80, 96, 112 and 128. |
+| Sample rate (Hz) | Default: 22050, what Broadcastify recommends. Other choices: 16000, 24000, 32000, 44100 and 48000. |
+| Volume | How loud the calls play: 1 is as recorded, 2 twice as loud, 0.5 half as loud, from 0.1 to 10. If your recorder's audio is quiet, try 2 or 3. Loud parts are clipped, so raise it only as far as you need. Default: 1. |
 | System | The system whose calls the feed plays. Empty: every system. |
 | Talkgroups | The talkgroups the feed plays, by number. `*` matches any digits and `?` any one digit, so `507*` matches 5071 and 50712. Empty: every talkgroup, unless talkgroups are on the left or right (see [Stereo](#stereo)). |
 | Leave out talkgroups | Talkgroups the feed never plays, written the same way. |
@@ -63,7 +64,7 @@ filled in.
 | Show the talkgroup as the title | Turns on alpha tags for the stream: its title shows the talkgroup playing, such as "Fire Dispatch (101)", using the recorder's alpha tag for that talkgroup. Off by default. Not every server accepts titles. |
 | Stream name, Description, Genre, Website | What listeners see about the stream. Stream name defaults to the feed's Name. |
 | List publicly | Asks the server to list the stream in its public directory. Leave it off for Broadcastify. |
-| Longest delay (seconds) | Calls that happen at the same time play one after another (on a stereo feed, each side on its own). When more than this much audio is waiting, the oldest waiting call is dropped. Default: 60. |
+| Longest delay (seconds) | Calls that happen at the same time play one after another (on a stereo feed, each side on its own). When more than this much audio is waiting, the oldest waiting call is dropped. Default: 60. For a feed meant to sound live, 10 to 15 keeps it close to real time. |
 
 You can add as many feeds as you like, each with its own mount. A system can
 also have feeds of its own, set on the system's card under **Systems**. Those
@@ -92,14 +93,16 @@ playing last.
 
 ### Broadcastify
 
-Leave Bitrate at 16 and Sample rate at 22050. Broadcastify feeds are 16 kbps
-mono MP3 at 22050 Hz, and it doesn't allow higher settings. If your feed's
-Technical tab lists different values, use those.
+The defaults, 16 kbps mono MP3 at 22050 Hz, are what Broadcastify recommends
+for a feed, and for a stereo feed (with talkgroups on the left or right) it
+recommends 32 kbps at 22050 Hz, so set Bitrate to 32. These are
+recommendations, not limits: Broadcastify's servers take higher settings too.
+If your feed's Technical tab lists other values, use those. If you're moving
+a feed from another streaming setup, such as Liquidsoap or a scanner's
+software, you can keep the bitrate and sample rate it used.
 
-The one exception is a stereo feed (with talkgroups on the left or right),
-which Broadcastify takes at 32 kbps and 22050 Hz: set Bitrate to 32. The feed
-has to be set up as stereo on Broadcastify's side too, so ask them before you
-switch an existing mono feed.
+A stereo feed may also need to be set up as stereo on Broadcastify's side.
+Check your feed's settings there before you switch an existing mono feed.
 
 ## When something's wrong
 

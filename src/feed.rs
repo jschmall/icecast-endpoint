@@ -43,6 +43,8 @@ pub struct Settings {
     pub name: String,
     pub max_delay: Duration,
     pub update_title: bool,
+    /// How much louder (or quieter) than recorded: 1 is as recorded.
+    pub volume: f32,
 }
 
 /// Messages waiting for a feed (at 50 chunks a second, over a minute of a call).
@@ -110,10 +112,10 @@ impl Feed {
 }
 
 fn run(s: Settings, rx: Receiver<Msg>, health: &Health, stop: &AtomicBool) {
-    let Settings { target, name, max_delay, update_title } = s;
+    let Settings { target, name, max_delay, update_title, volume } = s;
     let (rate, kbps, stereo) = (target.info.rate, target.info.kbps, target.info.stereo);
     let Ok(mut enc) = Mp3::new(rate, kbps, stereo) else { return };
-    let mut mix = Mix::new(rate, max_delay, stereo);
+    let mut mix = Mix::new(rate, max_delay, stereo, volume);
     let mut conn: Option<(TcpStream, Instant)> = None;
     let mut use_source = false;
     let mut backoff = BACKOFF.0;
@@ -247,12 +249,13 @@ struct Mix {
     lanes: Vec<Scheduler>,
     /// Each lane's audio, before it's mixed.
     bufs: [Vec<i16>; 3],
+    volume: f32,
 }
 
 impl Mix {
-    fn new(rate: u32, max_delay: Duration, stereo: bool) -> Mix {
+    fn new(rate: u32, max_delay: Duration, stereo: bool, volume: f32) -> Mix {
         let lanes = (0..if stereo { 3 } else { 1 }).map(|_| Scheduler::new(rate, max_delay)).collect();
-        Mix { lanes, bufs: Default::default() }
+        Mix { lanes, bufs: Default::default(), volume }
     }
 
     fn lane(&mut self, pan: Pan) -> &mut Scheduler {
@@ -275,10 +278,6 @@ impl Mix {
 
     /// The next `n` samples (`right` is left alone in mono).
     fn pull(&mut self, n: usize, now: Instant, left: &mut Vec<i16>, right: &mut Vec<i16>) {
-        if self.lanes.len() == 1 {
-            self.lanes[0].pull(n, now, left);
-            return;
-        }
         for (lane, buf) in self.lanes.iter_mut().zip(self.bufs.iter_mut()) {
             buf.clear();
             lane.pull(n, now, buf);
@@ -288,9 +287,9 @@ impl Mix {
 
     /// Everything waiting, as fast as it can go.
     fn drain(&mut self, now: Instant, left: &mut Vec<i16>, right: &mut Vec<i16>) {
-        let mono = self.lanes.len() == 1;
         for (lane, buf) in self.lanes.iter_mut().zip(self.bufs.iter_mut()) {
             buf.clear();
+            lane.end_all();
             for _ in 0..1000 {
                 let n = lane.backlog();
                 if n == 0 {
@@ -301,20 +300,23 @@ impl Mix {
             // Let a call that has ended count as played.
             lane.pull(1, now, buf);
         }
-        if mono {
-            left.append(&mut self.bufs[0]);
-            return;
-        }
         let n = self.bufs.iter().map(Vec::len).max().unwrap_or(0);
         self.bufs.iter_mut().for_each(|b| b.resize(n, 0));
         self.mix(left, right);
     }
 
-    /// The left and the center to the left, the right and the center to the right.
+    /// At the volume, clipped: mono to `left`; in stereo, the left and the
+    /// center to the left, the right and the center to the right.
     fn mix(&self, left: &mut Vec<i16>, right: &mut Vec<i16>) {
+        let v = self.volume;
+        let out = move |a: i16, b: i16| ((a as f32 + b as f32) * v).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        if self.lanes.len() == 1 {
+            left.extend(self.bufs[0].iter().map(|&a| out(a, 0)));
+            return;
+        }
         let [l, c, r] = &self.bufs;
-        left.extend(l.iter().zip(c).map(|(a, b)| a.saturating_add(*b)));
-        right.extend(r.iter().zip(c).map(|(a, b)| a.saturating_add(*b)));
+        left.extend(l.iter().zip(c).map(|(&a, &b)| out(a, b)));
+        right.extend(r.iter().zip(c).map(|(&a, &b)| out(a, b)));
     }
 }
 
@@ -429,6 +431,7 @@ mod tests {
     use super::*;
     use crate::encode::frames;
     use crate::icecast::{Protocol, StreamInfo, fake};
+    use crate::schedule::PREFILL;
     use trunk_recorder_plugin::{Level, testing};
 
     fn settings(port: u16) -> Settings {
@@ -441,7 +444,7 @@ mod tests {
             protocol: Protocol::Auto,
             info: StreamInfo { name: "County".into(), rate: 22050, kbps: 16, ..Default::default() },
         };
-        Settings { name: format!("County (127.0.0.1:{port}/feed)"), target, max_delay: Duration::from_secs(60), update_title: false }
+        Settings { name: format!("County (127.0.0.1:{port}/feed)"), target, max_delay: Duration::from_secs(60), update_title: false, volume: 1.0 }
     }
 
     fn soon() -> Instant {
@@ -575,19 +578,19 @@ mod tests {
 
     #[test]
     fn each_side_plays_its_own_calls_at_once() {
-        let mut m = Mix::new(22050, Duration::from_secs(60), true);
+        let mut m = Mix::new(22050, Duration::from_secs(60), true, 1.0);
         let t = Instant::now();
         m.lane(Pan::Left).start(1, "left".into(), t);
         m.lane(Pan::Right).start(2, "right".into(), t);
         m.audio(1, 22050, &[100; 50], t);
         m.audio(2, 22050, &[200; 50], t);
-        let (l, r) = mix_pull(&mut m, 50, t);
+        let (l, r) = mix_pull(&mut m, 50, t + PREFILL);
         assert_eq!((l, r), (vec![100; 50], vec![200; 50]));
     }
 
     #[test]
     fn the_center_is_in_both_ears() {
-        let mut m = Mix::new(22050, Duration::from_secs(60), true);
+        let mut m = Mix::new(22050, Duration::from_secs(60), true, 1.0);
         let t = Instant::now();
         m.lane(Pan::Center).start(1, String::new(), t);
         m.lane(Pan::Left).start(2, String::new(), t);
@@ -595,7 +598,7 @@ mod tests {
         m.audio(2, 22050, &[10000; 10], t);
         // Audio of a call it wasn't told of: the center.
         m.audio(3, 22050, &[7; 10], t);
-        let (l, r) = mix_pull(&mut m, 10, t);
+        let (l, r) = mix_pull(&mut m, 10, t + PREFILL);
         // Mixed, without wrapping around.
         assert_eq!((l, r), (vec![i16::MAX; 10], vec![30000; 10]));
         assert!(m.lanes[1].knows(3));
@@ -603,25 +606,25 @@ mod tests {
 
     #[test]
     fn a_side_queues_its_calls() {
-        let mut m = Mix::new(22050, Duration::from_secs(60), true);
+        let mut m = Mix::new(22050, Duration::from_secs(60), true, 1.0);
         let t = Instant::now();
         m.lane(Pan::Left).start(1, String::new(), t);
         m.lane(Pan::Left).start(2, String::new(), t);
         m.audio(2, 22050, &[2; 10], t);
         m.audio(1, 22050, &[1; 10], t);
-        let (l, r) = mix_pull(&mut m, 10, t);
+        let (l, r) = mix_pull(&mut m, 10, t + PREFILL);
         assert_eq!((l, r), (vec![1; 10], vec![0; 10]));
         // A call's end reaches whichever lane it's in.
         for lane in &mut m.lanes {
             lane.end(1);
         }
-        let (l, _) = mix_pull(&mut m, 20000, t);
+        let (l, _) = mix_pull(&mut m, 20000, t + PREFILL);
         assert!(l.contains(&2));
     }
 
     #[test]
     fn draining_keeps_the_sides_together() {
-        let mut m = Mix::new(22050, Duration::from_secs(60), true);
+        let mut m = Mix::new(22050, Duration::from_secs(60), true, 1.0);
         let t = Instant::now();
         m.lane(Pan::Left).start(1, String::new(), t);
         m.audio(1, 22050, &[1; 100], t);
@@ -635,14 +638,33 @@ mod tests {
 
     #[test]
     fn mono_is_one_lane() {
-        let mut m = Mix::new(22050, Duration::from_secs(60), false);
+        let mut m = Mix::new(22050, Duration::from_secs(60), false, 1.0);
         let t = Instant::now();
         m.lane(Pan::Left).start(1, String::new(), t);
         m.lane(Pan::Right).start(2, String::new(), t);
         assert_eq!(m.lanes.len(), 1);
         m.audio(1, 22050, &[1; 10], t);
-        let (l, r) = mix_pull(&mut m, 10, t);
+        let (l, r) = mix_pull(&mut m, 10, t + PREFILL);
         assert_eq!((l, r.len()), (vec![1; 10], 0));
+    }
+
+    #[test]
+    fn the_volume_raises_and_clips() {
+        let t = Instant::now();
+        for stereo in [false, true] {
+            let mut m = Mix::new(22050, Duration::from_secs(60), stereo, 3.0);
+            m.audio(1, 22050, &[1000, -1000, 20000, -20000], t);
+            let (l, r) = mix_pull(&mut m, 4, t + PREFILL);
+            assert_eq!(l, [3000, -3000, i16::MAX, i16::MIN]);
+            assert_eq!(r.is_empty(), !stereo);
+        }
+        let mut m = Mix::new(22050, Duration::from_secs(60), true, 0.5);
+        m.lane(Pan::Center).start(1, String::new(), t);
+        m.lane(Pan::Left).start(2, String::new(), t);
+        m.audio(1, 22050, &[30000; 2], t);
+        m.audio(2, 22050, &[10000; 2], t);
+        // Summed before the volume: a quieter mix isn't clipped.
+        assert_eq!(mix_pull(&mut m, 2, t + PREFILL), (vec![20000; 2], vec![15000; 2]));
     }
 
     #[test]
