@@ -3,16 +3,6 @@
 version = 4
 
 [[package]]
-name = "call-log"
-version = "0.1.0"
-dependencies = [
- "schemars",
- "serde",
- "serde_json",
- "trunk-recorder-plugin",
-]
-
-[[package]]
 name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -29,6 +19,16 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+
+[[package]]
+name = "icecast-endpoint"
+version = "0.1.0"
+dependencies = [
+ "schemars",
+ "serde",
+ "serde_json",
+ "trunk-recorder-plugin",
+]
 
 [[package]]
 name = "indexmap"

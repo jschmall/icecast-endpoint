@@ -59,7 +59,7 @@ impl Plugin for CallLog {
 
     fn manifest() -> Manifest {
         Manifest {
-            name: "Call log".into(),
+            name: "Icecast Endpoint".into(),
             subscribe: vec![topic::CALL_CONCLUDED.into()],
             // The id, version, description, … come from Cargo.toml.
             ..trunk_recorder_plugin::manifest!()
