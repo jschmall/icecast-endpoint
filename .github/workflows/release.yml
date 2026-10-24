@@ -26,7 +26,7 @@ jobs:
       id: ${{ steps.m.outputs.id }}
       version: ${{ steps.m.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - id: m
         run: |
           id=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].name')
@@ -52,7 +52,7 @@ jobs:
       ID: ${{ needs.meta.outputs.id }}
       VERSION: ${{ needs.meta.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target == 'universal-apple-darwin' && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.target }}
@@ -121,7 +121,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with: { pattern: dist-*, path: dist, merge-multiple: true }
       - name: Checksums
