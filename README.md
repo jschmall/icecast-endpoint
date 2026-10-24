@@ -56,7 +56,7 @@ filled in.
 | System | The system whose calls the feed plays. Empty: every system. |
 | Talkgroups | The talkgroups the feed plays, by number. `*` matches any digits and `?` any one digit, so `507*` matches 5071 and 50712. Empty: every talkgroup. |
 | Leave out talkgroups | Talkgroups the feed never plays, written the same way. |
-| Show the talkgroup as the title | Sets the stream's title to the talkgroup playing, such as "Fire Dispatch (101)". Not every server accepts titles. |
+| Show the talkgroup as the title | Turns on alpha tags for the stream: its title shows the talkgroup playing, such as "Fire Dispatch (101)", using the recorder's alpha tag for that talkgroup. Off by default. Not every server accepts titles. |
 | Stream name, Description, Genre, Website | What listeners see about the stream. Stream name defaults to the feed's Name. |
 | List publicly | Asks the server to list the stream in its public directory. Leave it off for Broadcastify. |
 | Longest delay (seconds) | Calls that happen at the same time play one after another. When more than this much audio is waiting, the oldest waiting call is dropped. Default: 60. |
