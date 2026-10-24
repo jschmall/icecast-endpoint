@@ -1,61 +1,108 @@
-# Trunk Recorder Pro plugin template
+# Icecast Endpoint
 
-A starting point for a [Trunk Recorder Pro](https://github.com/TrunkRecorder/trunk-recorder-pro)
-plugin in Rust: a working example plugin, tests, CI, and a release workflow
-that builds for every platform the recorder runs on.
+Streams your recorded calls live to an Icecast server, such as a
+[Broadcastify](https://www.broadcastify.com) feed. It's a plugin for
+[Trunk Recorder Pro](https://github.com/TrunkRecorder/trunk-recorder-pro).
 
-A plugin is a small program of its own. The recorder starts it, tells it what
-happens (a call starts, a recorded call lands on disk, a radio registers, …),
-and stops it. Plugins watch; they don't change what gets recorded. Uploaders
-(OpenMHz, Broadcastify), streamers, loggers and notifiers are all plugins.
+Each feed is one continuous audio stream, like a scanner's speaker output. Calls
+play as they're recorded, and there's silence between them. You choose which
+systems and talkgroups each feed plays.
 
-The example here, **call-log**, writes a line of JSON for every recorded call.
-For complete plugins built from this template, see the
-[OpenMHz](https://github.com/TrunkRecorder/trunk-plugin-openmhz),
-[Broadcastify](https://github.com/TrunkRecorder/trunk-plugin-broadcastify) and
-[Rdio Scanner](https://github.com/TrunkRecorder/trunk-plugin-rdioscanner)
-uploaders, [simplestream](https://github.com/TrunkRecorder/trunk-plugin-simplestream)
-(live audio) and [upload-script](https://github.com/TrunkRecorder/trunk-plugin-upload-script).
+> This plugin is for Broadcastify's **live audio feeds**. To upload individual
+> calls to **Broadcastify Calls**, use the
+> [Broadcastify plugin](https://github.com/TrunkRecorder/trunk-plugin-broadcastify) instead.
 
-## Quick start
+## What you need
 
-1. **Use this template** on GitHub (or copy it) to make your plugin's repository.
-2. In `Cargo.toml`, set `name` (your plugin's id), `description`, `repository`
-   and `authors`. In `src/main.rs`, set the display `name` in `manifest()`.
-   Delete `docs/` (it stays here, up to date) and rewrite this README for your
-   plugin's users. [Getting started](docs/getting-started.md#2-name-your-plugin)
-   has the full list.
-3. Build and look at what the recorder will see:
-   ```sh
-   cargo build
-   ./target/debug/call-log --describe
-   ```
-4. Run it against calls you've already recorded:
-   ```sh
-   trunk-pro plugin run ./target/debug/call-log ~/TrunkRecorderPro --limit 5
-   ```
-5. Replace the example with your plugin, and keep the tests passing:
-   `cargo test`.
-6. Tag a release (`git tag v0.1.0 && git push --tags`); the workflow builds it
-   for Linux, macOS and Windows. Then [submit it to the registry](docs/registry.md).
+- Trunk Recorder Pro.
+- An Icecast mount to stream to: its server, port, mount and source password.
+  For a Broadcastify feed, these are on your feed's **Technical** tab.
 
-## Documentation
+Nothing else to install. The MP3 encoder is built in.
 
-| | |
+## Getting started
+
+1. **Install the plugin.** Download the build for your computer from the
+   [releases page](https://github.com/jschmall/icecast-endpoint/releases) and
+   unpack it. In the recorder, open the **Plugins** page, press **Add from a
+   file**, and choose the `icecast-endpoint` program you unpacked.
+2. **Set it up.** Press **Set up** on the plugin's card, then **Add feed**.
+   Fill in **Server**, **Port**, **Mount** and **Password**. For a
+   Broadcastify feed, copy each one from your feed's Technical tab.
+3. **Choose what it plays** (optional). Pick a **System**, and list the
+   **Talkgroups** the feed is for. Left empty, the feed plays every call.
+4. **Turn it on**, and start recording.
+
+The plugin's card shows **streaming to** your feed once it's connected. To
+hear it, open your feed's page on Broadcastify, or
+`http://<server>:<port>/<mount>` for your own Icecast server.
+
+## Settings
+
+Each feed has these settings. Only Server, Mount and Password have to be
+filled in.
+
+| Setting | |
 |---|---|
-| [Getting started](docs/getting-started.md) | From this template to a plugin running in your recorder |
-| [How plugins work](docs/how-plugins-work.md) | The process, its lifecycle, threads, failures |
-| [Settings](docs/settings.md) | Config structs and the settings form drawn from them |
-| [Events](docs/events.md) | Everything a plugin can subscribe to, field by field |
-| [Audio](docs/audio.md) | WAV and M4A, and what to do when M4A isn't there |
-| [Writing an uploader](docs/uploading.md) | Keys, retries, requests: a plugin that sends calls to a service |
-| [Testing](docs/testing.md) | Unit tests, and running against real calls |
-| [Releasing](docs/releasing.md) | Versions, the release workflow, platforms |
-| [The plugin registry](docs/registry.md) | How plugins get listed, installed and updated |
-| [Protocol](docs/protocol.md) | The wire format, for plugins in other languages |
+| Name | What to call the feed in the recorder's log. |
+| Server | The server's host name, such as `audio9.broadcastify.com`. |
+| Port | The server's port. Default: 80. |
+| Mount | The mount point, such as `/abcd1234`. |
+| Username | Leave it as `source` unless your server says otherwise. |
+| Password | The mount's source password. |
+| Protocol | **Automatic** works with any Icecast server. Choose PUT or SOURCE only if your server needs one of them. |
+| Bitrate (kbps) | Default: 16, what Broadcastify requires. Other choices: 8, 24, 32, 40, 48, 64, 80, 96, 112 and 128. |
+| Sample rate (Hz) | Default: 22050, what Broadcastify requires. Other choices: 16000, 24000, 32000, 44100 and 48000. |
+| System | The system whose calls the feed plays. Empty: every system. |
+| Talkgroups | The talkgroups the feed plays, by number. `*` matches any digits and `?` any one digit, so `507*` matches 5071 and 50712. Empty: every talkgroup. |
+| Leave out talkgroups | Talkgroups the feed never plays, written the same way. |
+| Show the talkgroup as the title | Sets the stream's title to the talkgroup playing, such as "Fire Dispatch (101)". Not every server accepts titles. |
+| Stream name, Description, Genre, Website | What listeners see about the stream. Stream name defaults to the feed's Name. |
+| List publicly | Asks the server to list the stream in its public directory. Leave it off for Broadcastify. |
+| Longest delay (seconds) | Calls that happen at the same time play one after another. When more than this much audio is waiting, the oldest waiting call is dropped. Default: 60. |
 
-The SDK's API reference is on [docs.rs/trunk-recorder-plugin](https://docs.rs/trunk-recorder-plugin).
+You can add as many feeds as you like, each with its own mount. A system can
+also have feeds of its own, set on the system's card under **Systems**. Those
+feeds play only that system's calls.
+
+### Broadcastify
+
+Leave Bitrate at 16 and Sample rate at 22050. Broadcastify feeds are 16 kbps
+mono MP3 at 22050 Hz, and it doesn't allow higher settings. If your feed's
+Technical tab lists different values, use those.
+
+## When something's wrong
+
+The plugin's card, and the recorder's log, say what's wrong:
+
+| Message | What to do |
+|---|---|
+| wrong username or password | Check the Password (and Username) against your feed's Technical tab. |
+| the server refused the mount (in use by another source…) | Something else is already streaming to that mount, such as an old scanner setup. Stop it, or use another mount. |
+| there's no such mount | Check the Mount. |
+| can't connect to … | Check the Server and Port, and your internet connection. The plugin keeps retrying on its own. |
+
+If the connection drops, the plugin reconnects by itself, waiting a little
+longer after each try, up to a minute.
+
+## What it sends where
+
+Each feed sends audio of the calls it plays, as MP3, to the server you set.
+With **Show the talkgroup as the title** on, it also sends the talkgroup's name
+and number. Nothing else leaves your computer, and passwords never appear in
+the log.
+
+## Building from source
+
+```sh
+cargo build --release
+cargo test
+```
+
+To test against a local Icecast server in Docker, run `scripts/icecast.sh up`,
+then `cargo test -- --ignored`.
 
 ## License
 
-The template is MIT-licensed; your plugin can use any license you like.
+MIT. The plugin includes the [LAME](https://lame.sourceforge.io) MP3 encoder,
+which is under the LGPL.
