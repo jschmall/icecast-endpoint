@@ -1,9 +1,9 @@
-//! MP3 encoding with LAME: constant bitrate, mono. The one place the
-//! encoder crate is used.
+//! MP3 encoding with LAME: constant bitrate, mono or stereo. The one place
+//! the encoder crate is used.
 
 use std::num::NonZeroU32;
 
-use mp3lame_encoder::{Bitrate, Builder, Encoder, FlushGap, Mode, MonoPcm, Quality};
+use mp3lame_encoder::{Bitrate, Builder, DualPcm, Encoder, EncoderInput, FlushGap, Mode, MonoPcm, Quality};
 
 /// The sample rates MP3 has.
 pub const RATES: [u32; 9] = [8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000];
@@ -16,8 +16,9 @@ pub struct Mp3 {
 }
 
 impl Mp3 {
-    /// An encoder for mono audio at `rate`, to MP3 at `kbps`. Errors say what's wrong with the pair.
-    pub fn new(rate: u32, kbps: u32) -> Result<Mp3, String> {
+    /// An encoder for audio at `rate`, to MP3 at `kbps`, mono or (not joint) stereo.
+    /// Errors say what's wrong with the settings.
+    pub fn new(rate: u32, kbps: u32, stereo: bool) -> Result<Mp3, String> {
         if !RATES.contains(&rate) {
             let rates: Vec<String> = RATES.iter().map(|r| r.to_string()).collect();
             return Err(format!("a sample rate of {rate} Hz isn't one MP3 has ({})", rates.join(", ")));
@@ -29,7 +30,7 @@ impl Mp3 {
         let e = |what: &'static str| move |err: mp3lame_encoder::BuildError| format!("the MP3 encoder refused the {what}: {err:?}");
         let enc = Builder::new()
             .ok_or("the MP3 encoder couldn't start")?
-            .with_num_channels(1)
+            .with_num_channels(if stereo { 2 } else { 1 })
             .map_err(e("channels"))?
             .with_sample_rate(rate)
             .map_err(e("sample rate"))?
@@ -37,7 +38,7 @@ impl Mp3 {
             .map_err(e("sample rate"))?
             .with_brate(brate)
             .map_err(e("bitrate"))?
-            .with_mode(Mode::Mono)
+            .with_mode(if stereo { Mode::Stereo } else { Mode::Mono })
             .map_err(e("mode"))?
             .with_quality(Quality::NearBest)
             .map_err(e("quality"))?
@@ -48,12 +49,21 @@ impl Mp3 {
         Ok(Mp3 { enc, out: Vec::new(), fed: false })
     }
 
-    /// Encode `pcm`, returning the MP3 bytes ready so far (often none: LAME works in frames).
+    /// Encode mono `pcm`, returning the MP3 bytes ready so far (often none: LAME works in frames).
     pub fn encode(&mut self, pcm: &[i16]) -> Result<&[u8], String> {
+        self.encode_any(pcm.len(), MonoPcm(pcm))
+    }
+
+    /// Encode stereo audio, the same length each side.
+    pub fn encode_stereo(&mut self, left: &[i16], right: &[i16]) -> Result<&[u8], String> {
+        self.encode_any(left.len().min(right.len()), DualPcm { left, right })
+    }
+
+    fn encode_any(&mut self, n: usize, pcm: impl EncoderInput) -> Result<&[u8], String> {
         self.out.clear();
-        self.fed |= !pcm.is_empty();
-        self.out.reserve(mp3lame_encoder::max_required_buffer_size(pcm.len()));
-        self.enc.encode_to_vec(MonoPcm(pcm), &mut self.out).map_err(|e| format!("MP3 encoding failed: {e:?}"))?;
+        self.fed |= n > 0;
+        self.out.reserve(mp3lame_encoder::max_required_buffer_size(n));
+        self.enc.encode_to_vec(pcm, &mut self.out).map_err(|e| format!("MP3 encoding failed: {e:?}"))?;
         Ok(&self.out)
     }
 
@@ -101,6 +111,7 @@ pub struct Frame {
     pub rate: u32,
     pub kbps: u32,
     pub mono: bool,
+    pub joint: bool,
     pub len: usize,
 }
 
@@ -125,7 +136,7 @@ pub fn frames(b: &[u8]) -> Result<Vec<Frame>, String> {
         }
         let pad = ((h[2] >> 1) & 1) as usize;
         let per = if version == 3 { 144 } else { 72 };
-        Some(Frame { rate, kbps, mono: h[3] >> 6 == 3, len: (per * kbps * 1000 / rate) as usize + pad })
+        Some(Frame { rate, kbps, mono: h[3] >> 6 == 3, joint: h[3] >> 6 == 1, len: (per * kbps * 1000 / rate) as usize + pad })
     };
     let mut at = (0..b.len()).find(|&i| header(&b[i..]).is_some()).ok_or("no MP3 frame")?;
     let mut out = Vec::new();
@@ -152,7 +163,7 @@ mod tests {
 
     #[test]
     fn broadcastifys_format() {
-        let mut m = Mp3::new(22050, 16).unwrap();
+        let mut m = Mp3::new(22050, 16, false).unwrap();
         let out = encode_all(&mut m, &vec![0; 22050 * 2]);
         let f = frames(&out).unwrap();
         // 1152 / 2 = 576 samples a frame at MPEG-2: 2 s is about 76 frames.
@@ -164,7 +175,7 @@ mod tests {
 
     #[test]
     fn audio_is_encoded_too() {
-        let mut m = Mp3::new(22050, 16).unwrap();
+        let mut m = Mp3::new(22050, 16, false).unwrap();
         let tone: Vec<i16> = (0..22050).map(|i| ((i as f64 * 0.2).sin() * 8000.0) as i16).collect();
         let f = frames(&encode_all(&mut m, &tone)).unwrap();
         assert!(f.iter().all(|f| f.kbps == 16));
@@ -173,15 +184,30 @@ mod tests {
     #[test]
     fn other_rates_and_bitrates() {
         for (rate, kbps) in [(16000, 8), (24000, 32), (44100, 64), (48000, 128)] {
-            let mut m = Mp3::new(rate, kbps).unwrap();
+            let mut m = Mp3::new(rate, kbps, false).unwrap();
             let f = frames(&encode_all(&mut m, &vec![0; rate as usize])).unwrap();
             assert_eq!((f[0].rate, f[0].kbps), (rate, kbps));
         }
     }
 
     #[test]
+    fn stereo() {
+        let mut m = Mp3::new(22050, 32, true).unwrap();
+        let tone: Vec<i16> = (0..22050).map(|i| ((i as f64 * 0.2).sin() * 8000.0) as i16).collect();
+        let mut out = Vec::new();
+        for c in tone.chunks(441) {
+            out.extend_from_slice(m.encode_stereo(c, &vec![0; c.len()]).unwrap());
+        }
+        out.extend(m.flush());
+        let f = frames(&out).unwrap();
+        assert!(f.iter().all(|f| f.rate == 22050 && f.kbps == 32 && !f.mono && !f.joint), "{:?}", f[0]);
+        // Broadcastify's 16 kbps works in stereo too.
+        assert!(Mp3::new(22050, 16, true).is_ok());
+    }
+
+    #[test]
     fn a_short_stream_still_ends_in_whole_frames() {
-        let mut m = Mp3::new(22050, 16).unwrap();
+        let mut m = Mp3::new(22050, 16, false).unwrap();
         let mut out = m.encode(&[1000; 100]).unwrap().to_vec();
         out.extend(m.flush());
         assert!(!frames(&out).unwrap().is_empty());
@@ -189,17 +215,17 @@ mod tests {
 
     #[test]
     fn nothing_to_flush_without_audio() {
-        let mut m = Mp3::new(22050, 16).unwrap();
+        let mut m = Mp3::new(22050, 16, false).unwrap();
         assert!(m.encode(&[]).unwrap().is_empty());
         assert!(m.flush().is_empty());
     }
 
     #[test]
     fn unsupported_settings_say_so() {
-        assert!(Mp3::new(22050, 17).err().unwrap().contains("17 kbps"));
-        assert!(Mp3::new(22050, 320).err().unwrap().contains("320 kbps"));
-        assert!(Mp3::new(11000, 16).err().unwrap().contains("11000"));
+        assert!(Mp3::new(22050, 17, false).err().unwrap().contains("17 kbps"));
+        assert!(Mp3::new(22050, 320, false).err().unwrap().contains("320 kbps"));
+        assert!(Mp3::new(11000, 16, false).err().unwrap().contains("11000"));
         // MPEG-1 rates start at 32 kbps.
-        assert!(Mp3::new(44100, 16).is_err());
+        assert!(Mp3::new(44100, 16, false).is_err());
     }
 }

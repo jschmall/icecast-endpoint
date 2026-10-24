@@ -2,6 +2,10 @@
 //! Icecast mount, in real time. Calls' audio is played as the scheduler
 //! says, and silence when there's none, so the server never times the
 //! source out. A slow or missing server never holds up the plugin.
+//!
+//! A stereo feed has three schedulers: calls on the left, in the center and
+//! on the right each play one at a time, and the three play at once, the
+//! center in both ears.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -18,9 +22,17 @@ use crate::encode::Mp3;
 use crate::icecast::{self, Method, Target};
 use crate::schedule::Scheduler;
 
+/// Where a call is heard on a stereo feed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Pan {
+    Left,
+    Center,
+    Right,
+}
+
 /// What the plugin tells a feed.
 pub enum Msg {
-    Start { id: u32, title: String },
+    Start { id: u32, title: String, pan: Pan },
     Audio { id: u32, rate: u32, samples: Vec<i16> },
     End { id: u32 },
 }
@@ -56,7 +68,7 @@ impl Feed {
     /// Start streaming. Errs if the stream's format can't be encoded.
     pub fn start(s: Settings, health: Health) -> Result<Feed, String> {
         let info = &s.target.info;
-        Mp3::new(info.rate, info.kbps)?;
+        Mp3::new(info.rate, info.kbps, info.stereo)?;
         let (tx, rx) = mpsc::sync_channel(QUEUE);
         let stop = Arc::new(AtomicBool::new(false));
         let name = s.name.clone();
@@ -99,27 +111,29 @@ impl Feed {
 
 fn run(s: Settings, rx: Receiver<Msg>, health: &Health, stop: &AtomicBool) {
     let Settings { target, name, max_delay, update_title } = s;
-    let (rate, kbps) = (target.info.rate, target.info.kbps);
-    let Ok(mut enc) = Mp3::new(rate, kbps) else { return };
-    let mut sched = Scheduler::new(rate, max_delay);
+    let (rate, kbps, stereo) = (target.info.rate, target.info.kbps, target.info.stereo);
+    let Ok(mut enc) = Mp3::new(rate, kbps, stereo) else { return };
+    let mut mix = Mix::new(rate, max_delay, stereo);
     let mut conn: Option<(TcpStream, Instant)> = None;
     let mut use_source = false;
     let mut backoff = BACKOFF.0;
     let mut retry_at = Instant::now();
     // The stream's clock: samples are due at `rate` from `since`.
     let (mut since, mut sent) = (Instant::now(), 0u64);
-    let mut title: Option<String> = None;
+    // The title on the server, and the one it should have: that of the call that began playing last.
+    let (mut title, mut want): (Option<String>, Option<String>) = (None, None);
+    let mut seen: Vec<Option<String>> = vec![None; mix.lanes.len()];
     let title_busy = Arc::new(AtomicBool::new(false));
     let title_warned = Arc::new(AtomicBool::new(false));
-    let mut pcm = Vec::new();
+    let (mut left, mut right) = (Vec::new(), Vec::new());
     let mut closing = false;
     while !stop.load(Ordering::Relaxed) {
         let tick = Instant::now();
         loop {
             match rx.try_recv() {
-                Ok(Msg::Start { id, title }) => sched.start(id, title, tick),
-                Ok(Msg::Audio { id, rate, samples }) => sched.audio(id, rate, &samples, tick),
-                Ok(Msg::End { id }) => sched.end(id),
+                Ok(Msg::Start { id, title, pan }) => mix.lane(pan).start(id, title, tick),
+                Ok(Msg::Audio { id, rate, samples }) => mix.audio(id, rate, &samples, tick),
+                Ok(Msg::End { id }) => mix.lanes.iter_mut().for_each(|l| l.end(id)),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     closing = true;
@@ -134,7 +148,7 @@ fn run(s: Settings, rx: Receiver<Msg>, health: &Health, stop: &AtomicBool) {
                     health.up(&name, format!("streaming to {name} ({how})"));
                     conn = Some((c, Instant::now()));
                     // A new stream: a fresh encoder, and its own clock.
-                    if let Ok(e) = Mp3::new(rate, kbps) {
+                    if let Ok(e) = Mp3::new(rate, kbps, stereo) {
                         enc = e;
                     }
                     (since, sent, title) = (Instant::now(), 0, None);
@@ -149,18 +163,10 @@ fn run(s: Settings, rx: Receiver<Msg>, health: &Health, stop: &AtomicBool) {
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        pcm.clear();
+        left.clear();
+        right.clear();
         if closing {
-            // Everything waiting goes now, as fast as the server takes it.
-            for _ in 0..1000 {
-                let n = sched.backlog();
-                if n == 0 {
-                    break;
-                }
-                sched.pull(n, tick, &mut pcm);
-            }
-            // Let a call that has ended count as played.
-            sched.pull(1, tick, &mut pcm);
+            mix.drain(tick, &mut left, &mut right);
         } else {
             let due = (since.elapsed().as_secs_f64() * rate as f64) as u64;
             let mut owed = due.saturating_sub(sent);
@@ -169,10 +175,11 @@ fn run(s: Settings, rx: Receiver<Msg>, health: &Health, stop: &AtomicBool) {
                 sent += owed - rate as u64;
                 owed = rate as u64;
             }
-            sched.pull(owed as usize, tick, &mut pcm);
+            mix.pull(owed as usize, tick, &mut left, &mut right);
             sent += owed;
         }
-        let mut mp3 = match enc.encode(&pcm) {
+        let encoded = if stereo { enc.encode_stereo(&left, &right) } else { enc.encode(&left) };
+        let mut mp3 = match encoded {
             Ok(b) => b.to_vec(),
             Err(e) => {
                 health.down(&name, format!("{name}: {e}"));
@@ -199,9 +206,16 @@ fn run(s: Settings, rx: Receiver<Msg>, health: &Health, stop: &AtomicBool) {
             }
         }
         if update_title && conn.is_some() {
-            let playing = sched.playing().map(String::from);
-            if playing.is_some() && playing != title && !title_busy.swap(true, Ordering::Relaxed) {
-                title = playing.clone();
+            for (lane, seen) in mix.lanes.iter().zip(seen.iter_mut()) {
+                let playing = lane.playing().map(String::from);
+                if playing != *seen {
+                    *seen = playing.clone();
+                    want = playing.or(want.take());
+                }
+            }
+            if want.is_some() && want != title && !title_busy.swap(true, Ordering::Relaxed) {
+                title = want.clone();
+                let playing = want.clone();
                 let (t, busy, warned, h, n) = (target.clone(), title_busy.clone(), title_warned.clone(), health.clone(), name.clone());
                 std::thread::spawn(move || {
                     if let Err(e) = icecast::update_title(&t, playing.as_deref().unwrap_or_default())
@@ -213,8 +227,8 @@ fn run(s: Settings, rx: Receiver<Msg>, health: &Health, stop: &AtomicBool) {
                 });
             }
         }
-        let (played, dropped) = sched.counts();
-        let backlog = sched.backlog() as f64 / rate as f64;
+        let (played, dropped) = mix.lanes.iter().map(|l| l.counts()).fold((0, 0), |a, c| (a.0 + c.0, a.1 + c.1));
+        let backlog = mix.lanes.iter().map(|l| l.backlog()).max().unwrap_or(0) as f64 / rate as f64;
         health.update(&name, |f| (f.played, f.calls_dropped, f.backlog) = (played, dropped, backlog));
         if closing {
             break;
@@ -225,6 +239,83 @@ fn run(s: Settings, rx: Receiver<Msg>, health: &Health, stop: &AtomicBool) {
         let _ = c.shutdown(Shutdown::Both);
     }
     health.report();
+}
+
+/// What a feed plays: one scheduler for mono, or one each for the left,
+/// the center and the right.
+struct Mix {
+    lanes: Vec<Scheduler>,
+    /// Each lane's audio, before it's mixed.
+    bufs: [Vec<i16>; 3],
+}
+
+impl Mix {
+    fn new(rate: u32, max_delay: Duration, stereo: bool) -> Mix {
+        let lanes = (0..if stereo { 3 } else { 1 }).map(|_| Scheduler::new(rate, max_delay)).collect();
+        Mix { lanes, bufs: Default::default() }
+    }
+
+    fn lane(&mut self, pan: Pan) -> &mut Scheduler {
+        let i = match (self.lanes.len(), pan) {
+            (1, _) | (_, Pan::Center) => (self.lanes.len()) / 2,
+            (_, Pan::Left) => 0,
+            (_, Pan::Right) => 2,
+        };
+        &mut self.lanes[i]
+    }
+
+    /// Audio goes to the lane its call is in (the center, for a call it wasn't told of).
+    fn audio(&mut self, id: u32, rate: u32, samples: &[i16], now: Instant) {
+        let lane = match self.lanes.iter().position(|l| l.knows(id)) {
+            Some(i) => &mut self.lanes[i],
+            None => self.lane(Pan::Center),
+        };
+        lane.audio(id, rate, samples, now);
+    }
+
+    /// The next `n` samples (`right` is left alone in mono).
+    fn pull(&mut self, n: usize, now: Instant, left: &mut Vec<i16>, right: &mut Vec<i16>) {
+        if self.lanes.len() == 1 {
+            self.lanes[0].pull(n, now, left);
+            return;
+        }
+        for (lane, buf) in self.lanes.iter_mut().zip(self.bufs.iter_mut()) {
+            buf.clear();
+            lane.pull(n, now, buf);
+        }
+        self.mix(left, right);
+    }
+
+    /// Everything waiting, as fast as it can go.
+    fn drain(&mut self, now: Instant, left: &mut Vec<i16>, right: &mut Vec<i16>) {
+        let mono = self.lanes.len() == 1;
+        for (lane, buf) in self.lanes.iter_mut().zip(self.bufs.iter_mut()) {
+            buf.clear();
+            for _ in 0..1000 {
+                let n = lane.backlog();
+                if n == 0 {
+                    break;
+                }
+                lane.pull(n, now, buf);
+            }
+            // Let a call that has ended count as played.
+            lane.pull(1, now, buf);
+        }
+        if mono {
+            left.append(&mut self.bufs[0]);
+            return;
+        }
+        let n = self.bufs.iter().map(Vec::len).max().unwrap_or(0);
+        self.bufs.iter_mut().for_each(|b| b.resize(n, 0));
+        self.mix(left, right);
+    }
+
+    /// The left and the center to the left, the right and the center to the right.
+    fn mix(&self, left: &mut Vec<i16>, right: &mut Vec<i16>) {
+        let [l, c, r] = &self.bufs;
+        left.extend(l.iter().zip(c).map(|(a, b)| a.saturating_add(*b)));
+        right.extend(r.iter().zip(c).map(|(a, b)| a.saturating_add(*b)));
+    }
 }
 
 /// What one feed has done.
@@ -383,7 +474,7 @@ mod tests {
         let (host, captured) = testing::capture();
         let health = Health::new(host);
         let feed = Feed::start(settings(server.port), health.clone()).unwrap();
-        feed.send(Msg::Start { id: 1, title: "Fire Dispatch (101)".into() });
+        feed.send(Msg::Start { id: 1, title: "Fire Dispatch (101)".into(), pan: Pan::Center });
         // 2 s of the call, in the recorder's 20 ms chunks.
         for c in tone(16000).chunks(160) {
             feed.send(Msg::Audio { id: 1, rate: 8000, samples: c.to_vec() });
@@ -442,7 +533,7 @@ mod tests {
         let server = fake::Server::ok();
         let (host, _) = testing::capture();
         let feed = Feed::start(Settings { update_title: true, ..settings(server.port) }, Health::new(host)).unwrap();
-        feed.send(Msg::Start { id: 1, title: "Fire Dispatch (101)".into() });
+        feed.send(Msg::Start { id: 1, title: "Fire Dispatch (101)".into(), pan: Pan::Center });
         feed.send(Msg::Audio { id: 1, rate: 8000, samples: tone(800) });
         let c = server.wait(|c| c.iter().any(|c| c.head.starts_with("GET /admin/metadata")));
         feed.finish(soon());
@@ -455,7 +546,7 @@ mod tests {
         let server = fake::Server::ok();
         let (host, _) = testing::capture();
         let feed = Feed::start(settings(server.port), Health::new(host)).unwrap();
-        feed.send(Msg::Start { id: 1, title: "Fire Dispatch (101)".into() });
+        feed.send(Msg::Start { id: 1, title: "Fire Dispatch (101)".into(), pan: Pan::Center });
         feed.send(Msg::Audio { id: 1, rate: 8000, samples: tone(800) });
         std::thread::sleep(Duration::from_millis(300));
         feed.finish(soon());
@@ -474,6 +565,117 @@ mod tests {
         let t = Instant::now();
         feed.finish(Instant::now() + Duration::from_millis(500));
         assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+    }
+
+    fn mix_pull(m: &mut Mix, n: usize, t: Instant) -> (Vec<i16>, Vec<i16>) {
+        let (mut l, mut r) = (Vec::new(), Vec::new());
+        m.pull(n, t, &mut l, &mut r);
+        (l, r)
+    }
+
+    #[test]
+    fn each_side_plays_its_own_calls_at_once() {
+        let mut m = Mix::new(22050, Duration::from_secs(60), true);
+        let t = Instant::now();
+        m.lane(Pan::Left).start(1, "left".into(), t);
+        m.lane(Pan::Right).start(2, "right".into(), t);
+        m.audio(1, 22050, &[100; 50], t);
+        m.audio(2, 22050, &[200; 50], t);
+        let (l, r) = mix_pull(&mut m, 50, t);
+        assert_eq!((l, r), (vec![100; 50], vec![200; 50]));
+    }
+
+    #[test]
+    fn the_center_is_in_both_ears() {
+        let mut m = Mix::new(22050, Duration::from_secs(60), true);
+        let t = Instant::now();
+        m.lane(Pan::Center).start(1, String::new(), t);
+        m.lane(Pan::Left).start(2, String::new(), t);
+        m.audio(1, 22050, &[30000; 10], t);
+        m.audio(2, 22050, &[10000; 10], t);
+        // Audio of a call it wasn't told of: the center.
+        m.audio(3, 22050, &[7; 10], t);
+        let (l, r) = mix_pull(&mut m, 10, t);
+        // Mixed, without wrapping around.
+        assert_eq!((l, r), (vec![i16::MAX; 10], vec![30000; 10]));
+        assert!(m.lanes[1].knows(3));
+    }
+
+    #[test]
+    fn a_side_queues_its_calls() {
+        let mut m = Mix::new(22050, Duration::from_secs(60), true);
+        let t = Instant::now();
+        m.lane(Pan::Left).start(1, String::new(), t);
+        m.lane(Pan::Left).start(2, String::new(), t);
+        m.audio(2, 22050, &[2; 10], t);
+        m.audio(1, 22050, &[1; 10], t);
+        let (l, r) = mix_pull(&mut m, 10, t);
+        assert_eq!((l, r), (vec![1; 10], vec![0; 10]));
+        // A call's end reaches whichever lane it's in.
+        for lane in &mut m.lanes {
+            lane.end(1);
+        }
+        let (l, _) = mix_pull(&mut m, 20000, t);
+        assert!(l.contains(&2));
+    }
+
+    #[test]
+    fn draining_keeps_the_sides_together() {
+        let mut m = Mix::new(22050, Duration::from_secs(60), true);
+        let t = Instant::now();
+        m.lane(Pan::Left).start(1, String::new(), t);
+        m.audio(1, 22050, &[1; 100], t);
+        m.lane(Pan::Right).start(2, String::new(), t);
+        m.audio(2, 22050, &[2; 30], t);
+        let (mut l, mut r) = (Vec::new(), Vec::new());
+        m.drain(t, &mut l, &mut r);
+        assert_eq!(l.len(), r.len());
+        assert_eq!((l[99], r[29], r[30]), (1, 2, 0));
+    }
+
+    #[test]
+    fn mono_is_one_lane() {
+        let mut m = Mix::new(22050, Duration::from_secs(60), false);
+        let t = Instant::now();
+        m.lane(Pan::Left).start(1, String::new(), t);
+        m.lane(Pan::Right).start(2, String::new(), t);
+        assert_eq!(m.lanes.len(), 1);
+        m.audio(1, 22050, &[1; 10], t);
+        let (l, r) = mix_pull(&mut m, 10, t);
+        assert_eq!((l, r.len()), (vec![1; 10], 0));
+    }
+
+    #[test]
+    fn a_stereo_feed_streams_stereo() {
+        let server = fake::Server::ok();
+        let (host, _) = testing::capture();
+        let mut s = settings(server.port);
+        (s.target.info.stereo, s.target.info.kbps) = (true, 32);
+        let feed = Feed::start(s, Health::new(host)).unwrap();
+        feed.send(Msg::Start { id: 1, title: String::new(), pan: Pan::Left });
+        feed.send(Msg::Audio { id: 1, rate: 8000, samples: tone(1600) });
+        feed.send(Msg::End { id: 1 });
+        feed.finish(soon());
+        let c = &server.wait(|c| c.first().is_some_and(|c| c.closed))[0];
+        let f = frames(&c.body).unwrap();
+        assert!(f.iter().all(|f| f.kbps == 32 && !f.mono && !f.joint), "{:?}", f[0]);
+    }
+
+    #[test]
+    fn titles_follow_the_call_that_began_last() {
+        let server = fake::Server::ok();
+        let (host, _) = testing::capture();
+        let mut s = Settings { update_title: true, ..settings(server.port) };
+        (s.target.info.stereo, s.target.info.kbps) = (true, 32);
+        let feed = Feed::start(s, Health::new(host)).unwrap();
+        feed.send(Msg::Start { id: 1, title: "Left".into(), pan: Pan::Left });
+        feed.send(Msg::Audio { id: 1, rate: 8000, samples: tone(16000) });
+        server.wait(|c| c.iter().any(|c| c.head.contains("song=Left")));
+        feed.send(Msg::Start { id: 2, title: "Right".into(), pan: Pan::Right });
+        feed.send(Msg::Audio { id: 2, rate: 8000, samples: tone(800) });
+        let c = server.wait(|c| c.iter().any(|c| c.head.contains("song=Right")));
+        feed.finish(soon());
+        assert!(c.iter().any(|c| c.head.contains("song=Right")), "the right call's title didn't follow");
     }
 
     #[test]

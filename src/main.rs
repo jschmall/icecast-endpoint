@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use trunk_recorder_plugin::{AudioChunk, CallInfo, Host, Manifest, Plugin, Setup, TalkgroupFilter, topic};
 
 use encode::Mp3;
-use feed::{Feed, Health, Msg};
+use feed::{Feed, Health, Msg, Pan};
 use icecast::{Protocol, StreamInfo, Target};
 
 #[derive(Serialize, Deserialize, JsonSchema, Default, PartialEq)]
@@ -67,7 +67,7 @@ struct FeedConfig {
     protocol: Protocol,
     /// Bitrate (kbps)
     ///
-    /// Broadcastify feeds are 16 kbps. Other MP3 bitrates: 8, 24, 32, 40, 48, 64, 80, 96, 112, 128.
+    /// Broadcastify feeds are 16 kbps (32 in stereo). Other MP3 bitrates: 8, 24, 32, 40, 48, 64, 80, 96, 112, 128.
     #[schemars(range(min = 8, max = 320))]
     bitrate: u32,
     /// Sample rate (Hz)
@@ -90,6 +90,16 @@ struct FeedConfig {
     /// Talkgroups this feed never plays, the same way.
     #[serde(deserialize_with = "trunk_recorder_plugin::filter::patterns")]
     exclude_talkgroups: Vec<String>,
+    /// Talkgroups on the left
+    ///
+    /// Talkgroups heard in the left ear, written the same way. Any here or on the right makes the feed stereo (Broadcastify stereo feeds are 32 kbps).
+    #[serde(deserialize_with = "trunk_recorder_plugin::filter::patterns")]
+    left_talkgroups: Vec<String>,
+    /// Talkgroups on the right
+    ///
+    /// Talkgroups heard in the right ear. Others play in both ears. The left, the center and the right each play their calls one at a time, and the three play at once.
+    #[serde(deserialize_with = "trunk_recorder_plugin::filter::patterns")]
+    right_talkgroups: Vec<String>,
     /// Show the talkgroup as the title
     ///
     /// Set the stream's title to the talkgroup playing. Not every server takes titles from a source.
@@ -111,7 +121,7 @@ struct FeedConfig {
     public: bool,
     /// Longest delay (seconds)
     ///
-    /// Calls at the same time play one after another. When more than this much is waiting, the oldest waiting call is dropped.
+    /// Calls at the same time (on the same side, for a stereo feed) play one after another. When more than this much is waiting, the oldest waiting call is dropped.
     #[schemars(range(min = 5, max = 600))]
     max_delay_seconds: u32,
 }
@@ -131,6 +141,8 @@ impl Default for FeedConfig {
             system: String::new(),
             talkgroups: Vec::new(),
             exclude_talkgroups: Vec::new(),
+            left_talkgroups: Vec::new(),
+            right_talkgroups: Vec::new(),
             update_title: false,
             stream_name: String::new(),
             description: String::new(),
@@ -162,6 +174,9 @@ struct Route {
     /// The system it plays (empty: all).
     system: String,
     filter: TalkgroupFilter,
+    /// The talkgroups heard on the left and on the right (empty: none).
+    left: TalkgroupFilter,
+    right: TalkgroupFilter,
     /// A system's own feed (it overrides the feeds): for it alone.
     only: Option<String>,
     /// The systems with feeds of their own, which the plugin's feeds aren't for.
@@ -239,17 +254,31 @@ impl Plugin for IcecastEndpoint {
             if !f.system.is_empty() && setup.system_named(&f.system).is_none() {
                 host.warn(format!("{which}: there's no system called {}", f.system));
             }
-            let filter = TalkgroupFilter::new(&f.talkgroups, &f.exclude_talkgroups);
+            // A talkgroup on a side is one the feed plays.
+            let plays: Vec<String> = if f.talkgroups.is_empty() && f.left_talkgroups.is_empty() && f.right_talkgroups.is_empty() {
+                Vec::new()
+            } else {
+                f.talkgroups.iter().chain(&f.left_talkgroups).chain(&f.right_talkgroups).cloned().collect()
+            };
+            let filter = TalkgroupFilter::new(&plays, &f.exclude_talkgroups);
+            let (left, right) = (TalkgroupFilter::new(&f.left_talkgroups, &[]), TalkgroupFilter::new(&f.right_talkgroups, &[]));
             let name = if f.name.trim().is_empty() { target.to_string() } else { format!("{} ({target})", f.name.trim()) };
             let of = match (only, f.system.as_str()) {
                 (Some(n), _) | (None, n) if !n.is_empty() => format!(" of {n}"),
                 _ => String::new(),
             };
             let tgs = if filter.is_empty() { "every talkgroup".to_string() } else { filter.describe() };
-            host.info(format!("feed {name}: {tgs}{of}, {} kbps at {} Hz", f.bitrate, f.sample_rate));
+            let mut sides = String::new();
+            for (side, s) in [("left", &left), ("right", &right)] {
+                if !s.is_empty() {
+                    sides += &format!(", {} on the {side}", s.describe());
+                }
+            }
+            let channels = if f.stereo() { "stereo" } else { "mono" };
+            host.info(format!("feed {name}: {tgs}{of}{sides}, {} kbps {channels} at {} Hz", f.bitrate, f.sample_rate));
             let settings = feed::Settings { target, name, max_delay: Duration::from_secs(f.max_delay_seconds as u64), update_title: f.update_title };
             let feed = Feed::start(settings, health.clone()).map_err(|e| format!("{which}: {e}"))?;
-            routes.push(Route { feed, system: f.system.clone(), filter, only: only.map(String::from), not: not.clone() });
+            routes.push(Route { feed, system: f.system.clone(), filter, left, right, only: only.map(String::from), not: not.clone() });
         }
         Ok(IcecastEndpoint { routes, calls: HashMap::new(), playing: HashMap::new() })
     }
@@ -318,7 +347,8 @@ impl IcecastEndpoint {
         }
         let routes: Vec<usize> = if skip { Vec::new() } else { (0..self.routes.len()).filter(|&i| self.routes[i].wants(short_name, talkgroups)).collect() };
         for &r in &routes {
-            self.routes[r].feed.send(Msg::Start { id, title: title.clone() });
+            let pan = pan(&self.routes[r].left, &self.routes[r].right, talkgroups);
+            self.routes[r].feed.send(Msg::Start { id, title: title.clone(), pan });
         }
         self.playing.insert(id, (routes, Instant::now()));
     }
@@ -374,7 +404,7 @@ impl FeedConfig {
         if !(5..=600).contains(&self.max_delay_seconds) {
             return Err(format!("the longest delay is {} seconds; make it from 5 to 600", self.max_delay_seconds));
         }
-        Mp3::new(self.sample_rate, self.bitrate)?;
+        Mp3::new(self.sample_rate, self.bitrate, self.stereo())?;
         let user = if self.username.trim().is_empty() { "source" } else { self.username.trim() };
         let name = if self.stream_name.trim().is_empty() { self.name.trim() } else { self.stream_name.trim() };
         Ok(Target {
@@ -392,8 +422,14 @@ impl FeedConfig {
                 public: self.public,
                 rate: self.sample_rate,
                 kbps: self.bitrate,
+                stereo: self.stereo(),
             },
         })
+    }
+
+    /// Talkgroups panned to a side make the feed stereo.
+    fn stereo(&self) -> bool {
+        !self.left_talkgroups.is_empty() || !self.right_talkgroups.is_empty()
     }
 }
 
@@ -410,6 +446,20 @@ fn title(c: &CallInfo) -> String {
         "" => format!("Talkgroup {}", c.talkgroup),
         tag => format!("{tag} ({})", c.talkgroup),
     }
+}
+
+/// Where a call is heard: as the first of its talkgroups on a side says (one on both is in the center).
+fn pan(left: &TalkgroupFilter, right: &TalkgroupFilter, talkgroups: &[u32]) -> Pan {
+    let on = |f: &TalkgroupFilter, t| !f.is_empty() && f.passes(t);
+    talkgroups
+        .iter()
+        .find_map(|&t| match (on(left, t), on(right, t)) {
+            (true, false) => Some(Pan::Left),
+            (false, true) => Some(Pan::Right),
+            (true, true) => Some(Pan::Center),
+            (false, false) => None,
+        })
+        .unwrap_or(Pan::Center)
 }
 
 /// Encrypted calls have nothing to hear, unless the system had the key.
@@ -484,6 +534,8 @@ mod tests {
                 "system",
                 "talkgroups",
                 "excludeTalkgroups",
+                "leftTalkgroups",
+                "rightTalkgroups",
                 "updateTitle",
                 "streamName",
                 "description",
@@ -501,6 +553,8 @@ mod tests {
         assert_eq!(p["port"]["default"], 80);
         assert_eq!(p["username"]["default"], "source");
         assert_eq!(p["maxDelaySeconds"]["default"], 60);
+        assert_eq!(p["leftTalkgroups"]["default"], json!([]));
+        assert_eq!(p["rightTalkgroups"]["type"], "array");
         assert_eq!(f["required"], json!(["server", "mount", "password"]));
     }
 
@@ -568,6 +622,53 @@ mod tests {
         ] {
             assert!(head.contains(&format!("{h}\r\n")), "{h}: {head}");
         }
+    }
+
+    #[test]
+    fn talkgroups_on_a_side_make_the_feed_stereo() {
+        let server = fake::Server::ok();
+        let out = run(vec![hello(json!([feed(server.port, json!({ "bitrate": 32, "leftTalkgroups": ["101"] }))]))]);
+        assert!(out.ready(), "{:?}", out.messages);
+        let head = &server.wait(|c| !c.is_empty())[0].head;
+        assert!(head.contains("ice-audio-info: channels=2;samplerate=22050;bitrate=32\r\n"), "{head}");
+        assert!(out.logs().iter().any(|(_, l)| l.contains("101 on the left, 32 kbps stereo")), "{:?}", out.logs());
+    }
+
+    #[test]
+    fn where_calls_are_heard() {
+        let f = |v: &[&str]| TalkgroupFilter::new(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>(), &[]);
+        let (left, right) = (f(&["1*"]), f(&["2*", "150"]));
+        assert_eq!(pan(&left, &right, &[101]), Pan::Left);
+        assert_eq!(pan(&left, &right, &[202]), Pan::Right);
+        assert_eq!(pan(&left, &right, &[303]), Pan::Center);
+        // On both sides: the center.
+        assert_eq!(pan(&left, &right, &[150]), Pan::Center);
+        // A patched call: as its first talkgroup on a side.
+        assert_eq!(pan(&left, &right, &[303, 202, 101]), Pan::Right);
+        // Mono: no sides.
+        assert_eq!(pan(&f(&[]), &f(&[]), &[101]), Pan::Center);
+    }
+
+    #[test]
+    fn talkgroups_on_a_side_are_played() {
+        let server = fake::Server::ok();
+        let mut m = vec![hello(json!([feed(server.port, json!({ "talkgroups": ["300"], "leftTalkgroups": ["101"], "rightTalkgroups": ["202"] }))]))];
+        for (id, tg) in [(1, 101), (2, 202), (3, 300), (4, 404)] {
+            m.extend(whole(call(id, tg)));
+        }
+        // 404 isn't on the feed.
+        assert_eq!(played(&run(m)), 3);
+    }
+
+    #[test]
+    fn sides_alone_say_what_plays() {
+        let server = fake::Server::ok();
+        let mut m = vec![hello(json!([feed(server.port, json!({ "leftTalkgroups": ["101"], "excludeTalkgroups": ["202"], "rightTalkgroups": ["202"] }))]))];
+        for (id, tg) in [(1, 101), (2, 202), (3, 300)] {
+            m.extend(whole(call(id, tg)));
+        }
+        // 300 isn't on a side (it would need Talkgroups), and 202 is left out.
+        assert_eq!(played(&run(m)), 1);
     }
 
     #[test]

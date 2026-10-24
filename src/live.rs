@@ -11,7 +11,7 @@ use trunk_recorder_plugin::{AudioChunk, CallInfo, HostMessage, Level, State, bas
 
 use crate::IcecastEndpoint;
 use crate::encode::frames;
-use crate::feed::{Feed, Health, Msg, Settings};
+use crate::feed::{Feed, Health, Msg, Pan, Settings};
 use crate::icecast::{Protocol, StreamInfo, Target};
 
 fn server() -> (String, u16) {
@@ -136,6 +136,28 @@ fn streams_with_source() {
 
 #[test]
 #[ignore]
+fn streams_stereo() {
+    let mut t = target("/live-stereo", Protocol::Auto);
+    (t.info.stereo, t.info.kbps) = (true, 32);
+    let (feed, _) = start(t, false);
+    feed.send(Msg::Start { id: 1, title: String::new(), pan: Pan::Left });
+    feed.send(Msg::Start { id: 2, title: String::new(), pan: Pan::Right });
+    for _ in 0..50 {
+        feed.send(Msg::Audio { id: 1, rate: 8000, samples: vec![1000; 160] });
+        feed.send(Msg::Audio { id: 2, rate: 8000, samples: vec![-1000; 160] });
+    }
+    let s = source("/live-stereo").expect("the mount is up");
+    assert_eq!(s["audio_info"], "channels=2;samplerate=22050;bitrate=32");
+    let (code, head, body) = get("/live-stereo", None, Duration::from_secs(3));
+    assert_eq!(code, 200, "{head}");
+    let f = frames(&body).unwrap();
+    assert!(f.len() > 20, "{} frames", f.len());
+    assert!(f.iter().all(|f| f.rate == 22050 && f.kbps == 32 && !f.mono && !f.joint), "{:?}", f[0]);
+    feed.finish(soon());
+}
+
+#[test]
+#[ignore]
 fn automatic_uses_put() {
     let (feed, captured) = start(target("/live-auto", Protocol::Auto), false);
     assert!(connected_with(&captured).ends_with("(PUT)"));
@@ -147,7 +169,7 @@ fn automatic_uses_put() {
 fn the_title_follows_the_call() {
     let (feed, _) = start(target("/live-title", Protocol::Auto), true);
     assert!(source("/live-title").is_some());
-    feed.send(Msg::Start { id: 1, title: "Fire Dispatch (101)".into() });
+    feed.send(Msg::Start { id: 1, title: "Fire Dispatch (101)".into(), pan: Pan::Center });
     for _ in 0..50 {
         feed.send(Msg::Audio { id: 1, rate: 8000, samples: vec![1000; 160] });
     }

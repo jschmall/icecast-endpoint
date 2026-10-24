@@ -41,6 +41,7 @@ pub struct StreamInfo {
     pub public: bool,
     pub rate: u32,
     pub kbps: u32,
+    pub stereo: bool,
 }
 
 /// A mount on a server, and how to stream to it.
@@ -156,7 +157,7 @@ fn start(t: &Target, method: Method) -> Result<TcpStream, Refusal> {
         }
     }
     add("ice-bitrate", &i.kbps.to_string());
-    add("ice-audio-info", &format!("channels=1;samplerate={};bitrate={}", i.rate, i.kbps));
+    add("ice-audio-info", &format!("channels={};samplerate={};bitrate={}", if i.stereo { 2 } else { 1 }, i.rate, i.kbps));
     head.push_str("\r\n");
     s.write_all(head.as_bytes()).map_err(|e| Refusal::Failed(format!("{t}: {e}")))?;
     let unsupported = |why: String| if method == Method::Put { Refusal::Unsupported(why) } else { Refusal::Failed(why) };
@@ -361,6 +362,7 @@ mod tests {
                 public: false,
                 rate: 22050,
                 kbps: 16,
+                stereo: false,
             },
         }
     }

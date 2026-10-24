@@ -6,7 +6,8 @@ Streams your recorded calls live to an Icecast server, such as a
 
 Each feed is one continuous audio stream, like a scanner's speaker output. Calls
 play as they're recorded, and there's silence between them. You choose which
-systems and talkgroups each feed plays.
+systems and talkgroups each feed plays. A feed can also be stereo, with
+talkgroups panned left and right so two calls can be heard at once.
 
 > This plugin is for Broadcastify's **live audio feeds**. To upload individual
 > calls to **Broadcastify Calls**, use the
@@ -30,7 +31,9 @@ Nothing else to install. The MP3 encoder is built in.
    Fill in **Server**, **Port**, **Mount** and **Password**. For a
    Broadcastify feed, copy each one from your feed's Technical tab.
 3. **Choose what it plays** (optional). Pick a **System**, and list the
-   **Talkgroups** the feed is for. Left empty, the feed plays every call.
+   **Talkgroups** the feed is for. Left empty, the feed plays every call. To
+   hear talkgroups side by side, list some under **Talkgroups on the left**
+   and **Talkgroups on the right** (see [Stereo](#stereo)).
 4. **Turn it on**, and start recording.
 
 The plugin's card shows **streaming to** your feed once it's connected. To
@@ -51,25 +54,52 @@ filled in.
 | Username | Leave it as `source` unless your server says otherwise. |
 | Password | The mount's source password. |
 | Protocol | **Automatic** works with any Icecast server. Choose PUT or SOURCE only if your server needs one of them. |
-| Bitrate (kbps) | Default: 16, what Broadcastify requires. Other choices: 8, 24, 32, 40, 48, 64, 80, 96, 112 and 128. |
+| Bitrate (kbps) | Default: 16, what Broadcastify requires for a mono feed (32 for stereo). Other choices: 8, 24, 32, 40, 48, 64, 80, 96, 112 and 128. |
 | Sample rate (Hz) | Default: 22050, what Broadcastify requires. Other choices: 16000, 24000, 32000, 44100 and 48000. |
 | System | The system whose calls the feed plays. Empty: every system. |
-| Talkgroups | The talkgroups the feed plays, by number. `*` matches any digits and `?` any one digit, so `507*` matches 5071 and 50712. Empty: every talkgroup. |
+| Talkgroups | The talkgroups the feed plays, by number. `*` matches any digits and `?` any one digit, so `507*` matches 5071 and 50712. Empty: every talkgroup, unless talkgroups are on the left or right (see [Stereo](#stereo)). |
 | Leave out talkgroups | Talkgroups the feed never plays, written the same way. |
+| Talkgroups on the left, Talkgroups on the right | Talkgroups heard in only one ear, written the same way. See [Stereo](#stereo). |
 | Show the talkgroup as the title | Turns on alpha tags for the stream: its title shows the talkgroup playing, such as "Fire Dispatch (101)", using the recorder's alpha tag for that talkgroup. Off by default. Not every server accepts titles. |
 | Stream name, Description, Genre, Website | What listeners see about the stream. Stream name defaults to the feed's Name. |
 | List publicly | Asks the server to list the stream in its public directory. Leave it off for Broadcastify. |
-| Longest delay (seconds) | Calls that happen at the same time play one after another. When more than this much audio is waiting, the oldest waiting call is dropped. Default: 60. |
+| Longest delay (seconds) | Calls that happen at the same time play one after another (on a stereo feed, each side on its own). When more than this much audio is waiting, the oldest waiting call is dropped. Default: 60. |
 
 You can add as many feeds as you like, each with its own mount. A system can
 also have feeds of its own, set on the system's card under **Systems**. Those
 feeds play only that system's calls.
+
+### Stereo
+
+A feed can play several talkgroups at once, panned left and right, like two
+scanners wired to the two sides of one input. List talkgroups under
+**Talkgroups on the left** and **Talkgroups on the right**, and the feed
+becomes stereo:
+
+- A call on the left is heard only in the left ear, and one on the right only
+  in the right. Other talkgroups play in the center, in both ears.
+- The left, the center and the right each play their own calls one at a
+  time, and all three play at once. A left call and a right call that happen
+  together are both heard live; two left calls take turns.
+- Talkgroups on a side are played even when they're not under **Talkgroups**.
+  When Talkgroups is empty, the feed plays only the talkgroups on the sides.
+  To play every other talkgroup in the center as well, put `*` in Talkgroups.
+- A talkgroup on both sides plays in the center. **Leave out talkgroups**
+  still wins over everything.
+
+With **Show the talkgroup as the title** on, the title is the call that began
+playing last.
 
 ### Broadcastify
 
 Leave Bitrate at 16 and Sample rate at 22050. Broadcastify feeds are 16 kbps
 mono MP3 at 22050 Hz, and it doesn't allow higher settings. If your feed's
 Technical tab lists different values, use those.
+
+The one exception is a stereo feed (with talkgroups on the left or right),
+which Broadcastify takes at 32 kbps and 22050 Hz: set Bitrate to 32. The feed
+has to be set up as stereo on Broadcastify's side too, so ask them before you
+switch an existing mono feed.
 
 ## When something's wrong
 

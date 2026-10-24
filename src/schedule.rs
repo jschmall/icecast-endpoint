@@ -129,6 +129,11 @@ impl Scheduler {
         out.resize(target, 0);
     }
 
+    /// Whether the call is here, waiting, playing or finished.
+    pub fn knows(&self, id: u32) -> bool {
+        self.calls.iter().any(|c| c.id == id) || self.finished.contains(&id)
+    }
+
     /// The title of the call playing, if one is.
     pub fn playing(&self) -> Option<&str> {
         self.calls.front().map(|c| c.title.as_str()).filter(|t| !t.is_empty())
@@ -335,6 +340,18 @@ mod tests {
             s.start(id, String::new(), t);
         }
         assert_eq!(s.counts().1, 1000 - MAX_CALLS as u64);
+    }
+
+    #[test]
+    fn knows_its_calls() {
+        let mut s = sched();
+        let t = Instant::now();
+        s.start(1, String::new(), t);
+        assert!(s.knows(1) && !s.knows(2));
+        s.end(1);
+        pull(&mut s, 10, t);
+        // Finished, and still known (so late audio isn't a new call elsewhere).
+        assert!(s.knows(1));
     }
 
     #[test]
