@@ -19,21 +19,18 @@ should also work as an endpoint.
   Return quickly. Hand network, encoding, and subprocess work to our own threads.
 - The SDK is the `trunk-recorder-plugin` crate. API reference: https://docs.rs/trunk-recorder-plugin
 - Settings are a config struct deriving JsonSchema. The recorder draws a settings form from it.
-  Only a subset of JSON Schema is supported; see docs/settings.md.
+  Only a subset of JSON Schema is supported; see the template's settings.md (below).
 
 ## Source of truth
 
 Read the relevant doc before writing code. Do not guess event names, field names, or protocol details.
 
-- docs/getting-started.md
-- docs/how-plugins-work.md (lifecycle, threads, failures)
-- docs/events.md (every subscribable event, including live audio)
-- docs/settings.md
-- docs/audio.md (audio formats, fallbacks)
-- docs/uploading.md (keys, retries, requests)
-- docs/testing.md
-- docs/releasing.md
-- docs/protocol.md
+The template's guide was removed from this repo before the first release. Read it upstream at
+https://github.com/TrunkRecorder/trunk-plugin-template/tree/main/docs:
+
+- getting-started.md, how-plugins-work.md (lifecycle, threads, failures), events.md (every subscribable
+  event, including live audio), settings.md, audio.md (audio formats, fallbacks), uploading.md,
+  testing.md, releasing.md, protocol.md, registry.md
 - Closest reference plugin: https://github.com/TrunkRecorder/trunk-plugin-simplestream (live audio streaming)
 - Other references: trunk-plugin-broadcastify (Calls API, not what we are building), trunk-plugin-openmhz,
   trunk-plugin-rdioscanner, trunk-plugin-upload-script (all under github.com/TrunkRecorder)
@@ -42,7 +39,7 @@ Read the relevant doc before writing code. Do not guess event names, field names
 
 Resolve these from the docs and the Icecast and Broadcastify specs before implementing. Do not assume.
 
-- Input: use the live audio event (see docs/events.md and docs/audio.md). Confirm sample rate, channel
+- Input: use the live audio event (see events.md and audio.md). Confirm sample rate, channel
   count, and sample format, and what happens between calls (no audio is delivered when idle).
 - Icecast source protocol: confirm which handshake to support (HTTP PUT as in Icecast 2.4+, and/or the
   legacy SOURCE method), authentication (username and password), mount point, and required headers
@@ -90,8 +87,8 @@ run a local Icecast server and point the plugin at it.
 
 - Update the version in Cargo.toml, then `git tag vX.Y.Z && git push --tags`.
 - The release workflow builds Linux, macOS, and Windows binaries.
-- Before the first release: delete docs/ (template guide), rewrite README.md for end users.
-- Registry submission: see docs/registry.md.
+- Add a `## [X.Y.Z]` section to CHANGELOG.md for each version. The workflow uses it as the release notes.
+- Registry submission: see the template's registry.md.
 
 ## Working agreement
 

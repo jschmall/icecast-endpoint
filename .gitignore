@@ -1,5 +1,5 @@
 /target
 /dist
-# Developing against a local checkout of the SDK (see docs/testing.md).
+# Developing against a local checkout of the SDK (see the template's docs/testing.md).
 /.cargo/config.toml
 .DS_Store
