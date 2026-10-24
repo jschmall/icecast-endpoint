@@ -1,4 +1,16 @@
 {
-  "config": { "file": "calls.jsonl", "includeEncrypted": false },
-  "systems": { "sys1": { "label": "County" } }
+  "config": {
+    "feeds": [
+      {
+        "name": "County Fire",
+        "server": "127.0.0.1",
+        "port": 8000,
+        "mount": "/county-fire",
+        "password": "hackme",
+        "talkgroups": ["101", "102"],
+        "updateTitle": true
+      }
+    ]
+  },
+  "systems": {}
 }

@@ -17,6 +17,8 @@ trunk-recorder-plugin = "0.5.0"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# MP3 encoding: LAME 3.100, built from source into the binary (LGPL).
+mp3lame-encoder = "0.2.5"
 
 [profile.release]
 strip = true
