@@ -15,7 +15,7 @@ talkgroups panned left and right so two calls can be heard at once.
 
 ## What you need
 
-- Trunk Recorder Pro.
+- Trunk Recorder Pro v0.2.10 or later.
 - An Icecast mount to stream to: its server, port, mount and source password.
   For a Broadcastify feed, these are on your feed's **Technical** tab.
 
@@ -30,10 +30,12 @@ Nothing else to install. The MP3 encoder is built in.
 2. **Set it up.** Press **Set up** on the plugin's card, then **Add feed**.
    Fill in **Server**, **Port**, **Mount** and **Password**. For a
    Broadcastify feed, copy each one from your feed's Technical tab.
-3. **Choose what it plays** (optional). Pick a **System**, and list the
-   **Talkgroups** the feed is for. Left empty, the feed plays every call. To
-   hear talkgroups side by side, list some under **Talkgroups on the left**
-   and **Talkgroups on the right** (see [Stereo](#stereo)).
+3. **Choose what it plays** (optional). Pick a **System**, and under
+   **Talkgroups** choose **Every talkgroup**, **Only some** or **All but
+   some** (see [Choosing talkgroups](#choosing-talkgroups)). Left as it is,
+   the feed plays every call. To hear talkgroups side by side, list some under
+   **Talkgroups on the left** and **Talkgroups on the right** (see
+   [Stereo](#stereo)).
 4. **Turn it on**, and start recording.
 
 The plugin's card shows **streaming to** your feed once it's connected. To
@@ -58,9 +60,10 @@ filled in.
 | Sample rate (Hz) | Default: 22050, what Broadcastify recommends. Other choices: 16000, 24000, 32000, 44100 and 48000. |
 | Volume | How loud the calls play: 1 is as recorded, 2 twice as loud, 0.5 half as loud, from 0.1 to 10. If your recorder's audio is quiet, try 2 or 3. Loud parts are clipped, so raise it only as far as you need. Default: 1. |
 | System | The system whose calls the feed plays. Empty: every system. |
-| Talkgroups | The talkgroups the feed plays, by number. `*` matches any digits and `?` any one digit, so `507*` matches 5071 and 50712. Empty: every talkgroup, unless talkgroups are on the left or right (see [Stereo](#stereo)). |
-| Leave out talkgroups | Talkgroups the feed never plays, written the same way. |
-| Talkgroups on the left, Talkgroups on the right | Talkgroups heard in only one ear, written the same way. See [Stereo](#stereo). |
+| Talkgroups | Which talkgroups the feed plays: **Every talkgroup** (the default), **Only some** or **All but some**. See [Choosing talkgroups](#choosing-talkgroups). |
+| Only these | With **Only some**: the talkgroups the feed plays. |
+| Except these | With **Only some** or **All but some**: talkgroups the feed never plays. |
+| Talkgroups on the left, Talkgroups on the right | Talkgroups heard in only one ear. See [Stereo](#stereo). |
 | Show the talkgroup as the title | Turns on alpha tags for the stream: its title shows the talkgroup playing, such as "Fire Dispatch (101)", using the recorder's alpha tag for that talkgroup. Off by default. Not every server accepts titles. |
 | Stream name, Description, Genre, Website | What listeners see about the stream. Stream name defaults to the feed's Name. |
 | List publicly | Asks the server to list the stream in its public directory. Leave it off for Broadcastify. |
@@ -69,6 +72,42 @@ filled in.
 You can add as many feeds as you like, each with its own mount. A system can
 also have feeds of its own, set on the system's card under **Systems**. Those
 feeds play only that system's calls.
+
+### Choosing talkgroups
+
+Every talkgroup list (Only these, Except these, and the left and right lists)
+takes:
+
+- numbers: `101`
+- ranges: `1000-1099` is every talkgroup from 1000 to 1099 (`1000 - 1099`
+  works too)
+- patterns: `*` stands for any digits and `?` for one, so `507*` is every
+  talkgroup starting with 507, and `12???` every five-digit one starting with 12
+
+Separate them with spaces, commas or semicolons. The settings form checks each
+entry as you type it. If a list has something that isn't a talkgroup, the
+plugin won't start, and its card says which feed and which entry, such as
+`Feed County: talkgroups: "10OO" isn't a talkgroup`.
+
+**Only some** with nothing listed (here or on a side) won't start either:
+list the talkgroups, or choose **Every talkgroup**.
+
+#### Feeds set up with version 0.4.0 or earlier
+
+Before 0.5.0, a feed had **Talkgroups** and **Leave out talkgroups** lists
+instead of the menu. A feed saved that way keeps playing what it did, until
+you choose something in its Talkgroups menu:
+
+| Saved before | Plays as |
+|---|---|
+| Talkgroups listed (with or without Leave out talkgroups) | **Only some**: those, minus the ones left out |
+| Only Leave out talkgroups | **All but some**: every talkgroup but those |
+| Only talkgroups on a side | **Only some**: just the talkgroups on the sides |
+| Nothing | **Every talkgroup** |
+
+The plugin logs a warning for each such feed, saying what it plays. The old
+lists don't show in the form: choose the menu, fill in its lists, and save.
+Once the menu is chosen, the old lists no longer apply.
 
 ### Stereo
 
@@ -82,11 +121,12 @@ becomes stereo:
 - The left, the center and the right each play their own calls one at a
   time, and all three play at once. A left call and a right call that happen
   together are both heard live; two left calls take turns.
-- Talkgroups on a side are played even when they're not under **Talkgroups**.
-  When Talkgroups is empty, the feed plays only the talkgroups on the sides.
-  To play every other talkgroup in the center as well, put `*` in Talkgroups.
-- A talkgroup on both sides plays in the center. **Leave out talkgroups**
-  still wins over everything.
+- With **Only some**, talkgroups on a side are played even when they're not
+  under **Only these**: with Only these empty, the feed plays only the
+  talkgroups on the sides. To play every other talkgroup in the center as
+  well, choose **Every talkgroup** (or **All but some**).
+- A talkgroup on both sides plays in the center. **Except these** still wins
+  over everything.
 
 With **Show the talkgroup as the title** on, the title is the call that began
 playing last.

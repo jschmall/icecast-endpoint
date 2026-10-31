@@ -2,7 +2,7 @@
 # Your plugin's id: lowercase letters, digits and dashes. It names the
 # executable, the release files and the plugin's entry in the registry.
 name = "icecast-endpoint"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 description = "Allows for an Icecast mount, such as Broadcastify, to be used as an audio endpoint."
 license = "MIT"
@@ -11,7 +11,7 @@ authors = ["Jared Schmall <jared@schmall.me>"]
 publish = false
 
 [dependencies]
-trunk-recorder-plugin = "0.5.0"
+trunk-recorder-plugin = "0.8.0"
 # The settings form is drawn from your config structs' JSON Schema. Keep the
 # major version the SDK uses (1).
 schemars = "1"
