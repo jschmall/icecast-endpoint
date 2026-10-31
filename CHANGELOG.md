@@ -1,5 +1,96 @@
 # Changelog
 
+## [0.5.0]
+
+Talkgroups are chosen with the recorder's **Talkgroups** menu, lists take ranges, and a mistyped
+talkgroup stops the plugin with a message instead of being quietly ignored. Built with
+trunk-recorder-plugin 0.8.0, for Trunk Recorder Pro v0.2.10 and later. Feeds set up with 0.4.0 keep
+playing what they did.
+
+### Why
+
+Trunk Recorder Pro now has one way of choosing talkgroups everywhere: its delay rules, its signals,
+and every plugin (Broadcastify, OpenMHz and Rdio Scanner were changed the same way). Its plugin SDK
+went from 0.5.0 to 0.8.0 to match (upstream "Talkgroups chosen one way everywhere" and "Talkgroups:
+no legacy settings"). This release brings icecast-endpoint into line, so a feed's talkgroups look and
+behave like the rest of the app.
+
+### Added
+
+- **Talkgroups**, a menu on each feed, in place of the Talkgroups and Leave out talkgroups lists:
+  - **Every talkgroup** (the default): the feed plays every call of its system (or of every system).
+  - **Only some**: the feed plays the talkgroups under **Only these**, except those under **Except
+    these**.
+  - **All but some**: the feed plays every talkgroup except those under **Except these**.
+  Each list shows only while it applies. A list that's hidden keeps what's in it, in case you choose
+  that option again, but doesn't apply.
+- **Ranges** in every talkgroup list: `1000-1099` is every talkgroup from 1000 to 1099 (either way
+  round, and `1000 - 1099` with spaces works too). Numbers (`101`) and patterns (`507*`, `12???`) work
+  as before.
+- Entries can be separated by **spaces, commas or semicolons**: `101 102; 200-299` is three entries.
+- The settings form draws all four lists (Only these, Except these, Talkgroups on the left,
+  Talkgroups on the right) as the app's talkgroup inputs (`x-talkgroups`), and checks each entry as
+  it's typed.
+
+### Changed
+
+- **A bad talkgroup entry stops the plugin.** Before, an entry that wasn't a number or pattern (say
+  `10OO` with letter Os) never matched anything, so its talkgroup silently didn't play. Now the
+  plugin won't start, and its card says which feed, which list and which entry, for example
+  `Feed County: talkgroups: "10OO" isn't a talkgroup: give numbers, ranges like 1000-1099, or
+  patterns like 507* (* for any digits, ? for one)`. The left and right lists are checked the same
+  way (`Feed County: talkgroups on the left: …`). Every feed is checked before any starts streaming.
+- **Only some with nothing listed** (under Only these or on a side) stops the plugin too, asking you
+  to list the talkgroups or choose Every talkgroup, rather than playing nothing.
+- **Talkgroups on the left and right** take ranges and separators like the other lists. Their help
+  text says so. With **Only some**, they play even when they aren't under Only these (as they did
+  under Talkgroups before); with **Every talkgroup** or **All but some** they only choose the side.
+- **The start-up log line** describes a feed's talkgroups in the form's words: `only 101, 1000-1099;
+  except 1050` or `all but 202`, where it used to say `allow …; deny …`. The sides are listed as typed
+  and split into entries: `101, 102 on the left`.
+- **Built with trunk-recorder-plugin 0.8.0** (was 0.5.0). What the SDK versions in between brought,
+  and what this plugin does with them:
+  - 0.6.0: a call's result can carry how long the plugin's own work took (`took_ms`), and call
+    records say when the recorder's clock was off (`clock_off`). Not used: a feed has no upload
+    time of its own to report; the recorder still measures each call's age at delivery.
+  - 0.7.0: plugin pages, buttons (`x-actions`), settings taken without a restart (`live_settings`),
+    the `tone_pattern` topic, and systems' names, FCC licenses and sites in `hello`. Not used yet:
+    changing a feed still restarts the plugin, which reconnects its feeds.
+  - 0.7.1 and 0.8.0: the Talkgroups menu, ranges and checked lists, adopted here.
+  - The plugin protocol (API version 1) is unchanged, so this build talks to the recorder as 0.4.0
+    did.
+
+### Compatibility
+
+- **Feeds saved by 0.4.0 or earlier keep working.** Their old `talkgroups` and `excludeTalkgroups`
+  settings are still read for any feed that has no Talkgroups menu choice saved:
+  - Talkgroups listed (with or without Leave out talkgroups) play as **Only some**: those, minus the
+    ones left out.
+  - Only Leave out talkgroups listed plays as **All but some**.
+  - Only talkgroups on a side play as **Only some**: just the sides' talkgroups, as before.
+  - Nothing listed plays as **Every talkgroup**, as before.
+  The plugin logs a warning for each feed using its old lists, saying what it plays, for example
+  `Feed County: playing the talkgroups saved by an earlier version (only 101); choose Talkgroups on
+  the feed to see and change them`.
+- The old lists don't show in the settings form. **Once you choose a Talkgroups option on a feed and
+  save, the menu wins** and the old lists no longer apply, even if they're still in the saved
+  settings. Check the menu matches what the warning says before saving.
+- Old lists now get the same checks as the new ones: an entry in them that isn't a talkgroup stops
+  the plugin with a message naming it, where 0.4.0 ignored it.
+- Unchanged: audio, encoding, connections, stereo panning, volume, titles, the Longest delay, the
+  sent / failed / skipped counts, and every other setting. A system's own feeds (set on its card under
+  Systems) get the same menu.
+
+### Upgrading
+
+1. Update the plugin. Your feeds start as before; check the log for a warning on each feed that's
+   still using its old talkgroup lists.
+2. For each such feed, open it, choose **Only some** or **All but some** under Talkgroups, fill in
+   **Only these** / **Except these** as the warning describes, and save. Feeds with no talkgroup
+   lists need nothing.
+3. If the plugin won't start after updating, its card names the feed and the entry that isn't a
+   talkgroup: fix it, or remove it.
+
 ## [0.4.0]
 
 Sent, failed and skipped counts for each call on the Plugins page.
