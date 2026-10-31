@@ -7,7 +7,8 @@
         "port": 8000,
         "mount": "/county-fire",
         "password": "hackme",
-        "talkgroups": ["101", "102"],
+        "talkgroupMode": "only",
+        "talkgroupAllow": ["101", "102", "1000-1099"],
         "updateTitle": true
       }
     ]
