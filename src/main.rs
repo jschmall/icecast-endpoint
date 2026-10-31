@@ -15,8 +15,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use trunk_recorder_plugin::{AudioChunk, CallInfo, ConcludedCall, Host, Manifest, Plugin, Setup, TalkgroupFilter, topic};
+use serde::{Deserialize, Deserializer, Serialize};
+use trunk_recorder_plugin::filter::{TalkgroupMode, patterns, talkgroup_list};
+use trunk_recorder_plugin::{AudioChunk, CallInfo, ConcludedCall, Host, Manifest, Plugin, Setup, TalkgroupFilter, Talkgroups, topic};
 
 use encode::Mp3;
 use feed::{Feed, Health, Msg, Pan};
@@ -28,6 +29,7 @@ struct Config {
     /// Feeds
     ///
     /// The Icecast mounts to stream to, such as your Broadcastify feeds, and which calls each plays.
+    #[serde(deserialize_with = "feeds")]
     feeds: Vec<FeedConfig>,
 }
 
@@ -85,25 +87,21 @@ struct FeedConfig {
     /// The system whose calls this feed plays. Leave it empty for every system.
     #[schemars(extend("x-system" = true))]
     system: String,
-    /// Talkgroups
-    ///
-    /// The talkgroups this feed plays, by number. * matches any digits and ? any one (507*). Leave it empty for every talkgroup.
-    #[serde(deserialize_with = "trunk_recorder_plugin::filter::patterns")]
-    talkgroups: Vec<String>,
-    /// Leave out talkgroups
-    ///
-    /// Talkgroups this feed never plays, the same way.
-    #[serde(deserialize_with = "trunk_recorder_plugin::filter::patterns")]
-    exclude_talkgroups: Vec<String>,
+    // The talkgroups it plays: the recorder's Talkgroups menu (every one, only some, all but
+    // some) and the lists it asks for, as every plugin has it.
+    #[serde(flatten)]
+    talkgroups: Talkgroups,
     /// Talkgroups on the left
     ///
-    /// Talkgroups heard in the left ear, written the same way. Any here or on the right makes the feed stereo (Broadcastify recommends 32 kbps for stereo).
-    #[serde(deserialize_with = "trunk_recorder_plugin::filter::patterns")]
+    /// Talkgroups heard in the left ear: numbers, ranges like 1000-1099, and patterns like 507*. Any here or on the right makes the feed stereo (Broadcastify recommends 32 kbps for stereo). With "Only some", these play too.
+    #[serde(deserialize_with = "patterns")]
+    #[schemars(with = "Vec<String>", extend("x-talkgroups" = true))]
     left_talkgroups: Vec<String>,
     /// Talkgroups on the right
     ///
     /// Talkgroups heard in the right ear. Others play in both ears. The left, the center and the right each play their calls one at a time, and the three play at once.
-    #[serde(deserialize_with = "trunk_recorder_plugin::filter::patterns")]
+    #[serde(deserialize_with = "patterns")]
+    #[schemars(with = "Vec<String>", extend("x-talkgroups" = true))]
     right_talkgroups: Vec<String>,
     /// Show the talkgroup as the title
     ///
@@ -129,6 +127,43 @@ struct FeedConfig {
     /// Calls at the same time (on the same side, for a stereo feed) play one after another. When more than this much is waiting, the oldest waiting call is dropped.
     #[schemars(range(min = 5, max = 600))]
     max_delay_seconds: u32,
+    /// 0.4.0 and earlier's Talkgroups list: read, not shown or written. It applies only to a feed
+    /// saved before the menu (no `talkgroupMode`).
+    #[serde(rename = "talkgroups", deserialize_with = "patterns", skip_serializing)]
+    #[schemars(skip)]
+    old_talkgroups: Vec<String>,
+    /// 0.4.0 and earlier's Leave out talkgroups list, the same way.
+    #[serde(rename = "excludeTalkgroups", deserialize_with = "patterns", skip_serializing)]
+    #[schemars(skip)]
+    old_exclude_talkgroups: Vec<String>,
+    /// The feed was saved with a Talkgroups menu choice (`talkgroupMode`): set as the settings are read.
+    #[serde(skip)]
+    #[schemars(skip)]
+    menu: bool,
+}
+
+/// What a feed plays, and where.
+struct Filters {
+    plays: TalkgroupFilter,
+    left: TalkgroupFilter,
+    right: TalkgroupFilter,
+    /// The lists saved by 0.4.0 or earlier apply (the menu was never chosen).
+    old: bool,
+}
+
+/// The feeds, each told whether it was saved with a Talkgroups menu choice: the menu's own
+/// default (every talkgroup) can't say so.
+fn feeds<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<FeedConfig>, D::Error> {
+    let raw: Option<Vec<serde_json::Value>> = Option::deserialize(d)?;
+    raw.unwrap_or_default()
+        .into_iter()
+        .map(|v| {
+            let menu = v.get("talkgroupMode").is_some_and(|m| !m.is_null());
+            let mut f: FeedConfig = serde_json::from_value(v).map_err(serde::de::Error::custom)?;
+            f.menu = menu;
+            Ok(f)
+        })
+        .collect()
 }
 
 impl Default for FeedConfig {
@@ -145,8 +180,7 @@ impl Default for FeedConfig {
             sample_rate: 22050,
             volume: 1.0,
             system: String::new(),
-            talkgroups: Vec::new(),
-            exclude_talkgroups: Vec::new(),
+            talkgroups: Talkgroups::default(),
             left_talkgroups: Vec::new(),
             right_talkgroups: Vec::new(),
             update_title: false,
@@ -156,6 +190,9 @@ impl Default for FeedConfig {
             website: String::new(),
             public: false,
             max_delay_seconds: 60,
+            old_talkgroups: Vec::new(),
+            old_exclude_talkgroups: Vec::new(),
+            menu: true,
         }
     }
 }
@@ -262,28 +299,26 @@ impl Plugin for IcecastEndpoint {
                 (None, name) => format!("Feed {name}"),
             };
             let target = f.target().map_err(|e| format!("{which}: {e}"))?;
-            if checked
-                .iter()
-                .any(|(_, _, t, _): &(Option<&str>, &FeedConfig, Target, String)| t.host == target.host && t.port == target.port && t.mount == target.mount)
-            {
+            let filters = f.filters().map_err(|e| format!("{which}: {e}"))?;
+            if checked.iter().any(|(_, _, t, _, _): &(Option<&str>, &FeedConfig, Target, Filters, String)| {
+                t.host == target.host && t.port == target.port && t.mount == target.mount
+            }) {
                 return Err(format!("{which}: another feed streams to the same mount ({target}); a mount takes one source."));
             }
-            checked.push((only, f, target, which));
+            checked.push((only, f, target, filters, which));
         }
         let health = Health::new(host.clone());
         let mut routes = Vec::new();
-        for (only, f, target, which) in checked {
+        for (only, f, target, Filters { plays: filter, left, right, old }, which) in checked {
             if !f.system.is_empty() && setup.system_named(&f.system).is_none() {
                 host.warn(format!("{which}: there's no system called {}", f.system));
             }
-            // A talkgroup on a side is one the feed plays.
-            let plays: Vec<String> = if f.talkgroups.is_empty() && f.left_talkgroups.is_empty() && f.right_talkgroups.is_empty() {
-                Vec::new()
-            } else {
-                f.talkgroups.iter().chain(&f.left_talkgroups).chain(&f.right_talkgroups).cloned().collect()
-            };
-            let filter = TalkgroupFilter::new(&plays, &f.exclude_talkgroups);
-            let (left, right) = (TalkgroupFilter::new(&f.left_talkgroups, &[]), TalkgroupFilter::new(&f.right_talkgroups, &[]));
+            if old {
+                host.warn(format!(
+                    "{which}: playing the talkgroups saved by an earlier version ({}); choose Talkgroups on the feed to see and change them",
+                    if filter.is_empty() { "every talkgroup".to_string() } else { filter.describe() }
+                ));
+            }
             let name = if f.name.trim().is_empty() { target.to_string() } else { format!("{} ({target})", f.name.trim()) };
             let of = match (only, f.system.as_str()) {
                 (Some(n), _) | (None, n) if !n.is_empty() => format!(" of {n}"),
@@ -291,9 +326,11 @@ impl Plugin for IcecastEndpoint {
             };
             let tgs = if filter.is_empty() { "every talkgroup".to_string() } else { filter.describe() };
             let mut sides = String::new();
-            for (side, s) in [("left", &left), ("right", &right)] {
+            for (side, s) in [("left", &f.left_talkgroups), ("right", &f.right_talkgroups)] {
+                // Checked by filters(): the list as read.
+                let s = talkgroup_list(s).unwrap_or_default();
                 if !s.is_empty() {
-                    sides += &format!(", {} on the {side}", s.describe());
+                    sides += &format!(", {} on the {side}", s.join(", "));
                 }
             }
             let channels = if f.stereo() { "stereo" } else { "mono" };
@@ -492,7 +529,47 @@ impl FeedConfig {
 
     /// Talkgroups panned to a side make the feed stereo.
     fn stereo(&self) -> bool {
-        !self.left_talkgroups.is_empty() || !self.right_talkgroups.is_empty()
+        self.left_talkgroups.iter().chain(&self.right_talkgroups).any(|s| !s.trim().is_empty())
+    }
+
+    /// The Talkgroups menu as it applies: the feed's choice, else (a feed saved by 0.4.0 or
+    /// earlier, before the menu) what its old lists come to, and whether they did.
+    fn chosen(&self) -> (Talkgroups, bool) {
+        if self.menu {
+            return (self.talkgroups.clone(), false);
+        }
+        let (allow, deny) = (self.old_talkgroups.clone(), self.old_exclude_talkgroups.clone());
+        // 0.4.0: a feed played its talkgroups and its sides', or (all empty) every talkgroup.
+        let mode = if !allow.is_empty() || self.stereo() {
+            TalkgroupMode::Only
+        } else if !deny.is_empty() {
+            TalkgroupMode::AllBut
+        } else {
+            return (self.talkgroups.clone(), false);
+        };
+        let old = !allow.is_empty() || !deny.is_empty();
+        (Talkgroups { talkgroup_mode: mode, talkgroup_allow: allow, talkgroup_deny: deny }, old)
+    }
+
+    /// Which talkgroups the feed plays, and which on each side; errors name an entry that
+    /// isn't a talkgroup.
+    fn filters(&self) -> Result<Filters, String> {
+        let side = |list: &[String], side: &str| TalkgroupFilter::parse(list, &[]).map_err(|e| format!("talkgroups on the {side}: {e}"));
+        let (left, right) = (side(&self.left_talkgroups, "left")?, side(&self.right_talkgroups, "right")?);
+        let (t, old) = self.chosen();
+        let plays = match t.talkgroup_mode {
+            // Talkgroups on a side are ones the feed plays.
+            TalkgroupMode::Only => {
+                let allow: Vec<String> = t.talkgroup_allow.iter().chain(&self.left_talkgroups).chain(&self.right_talkgroups).cloned().collect();
+                let f = TalkgroupFilter::parse(&allow, &t.talkgroup_deny).map_err(|e| format!("talkgroups: {e}"))?;
+                if talkgroup_list(&allow).unwrap_or_default().is_empty() {
+                    return Err("talkgroups: list the talkgroups for \"Only some\" (or on a side), or choose \"Every talkgroup\"".into());
+                }
+                f
+            }
+            _ => t.filter().map_err(|e| format!("talkgroups: {e}"))?,
+        };
+        Ok(Filters { plays, left, right, old })
     }
 }
 
@@ -543,7 +620,7 @@ mod tests {
     use super::*;
     use crate::icecast::fake;
     use serde_json::{Value, json};
-    use trunk_recorder_plugin::{EXIT_CONFIG, HostMessage, Outcome, SystemInfo, testing};
+    use trunk_recorder_plugin::{EXIT_CONFIG, HostMessage, Level, Outcome, SystemInfo, testing};
 
     fn call(id: u32, tg: u32) -> CallInfo {
         CallInfo {
@@ -623,8 +700,9 @@ mod tests {
                 "sampleRate",
                 "volume",
                 "system",
-                "talkgroups",
-                "excludeTalkgroups",
+                "talkgroupMode",
+                "talkgroupAllow",
+                "talkgroupDeny",
                 "leftTalkgroups",
                 "rightTalkgroups",
                 "updateTitle",
@@ -648,6 +726,17 @@ mod tests {
         assert_eq!((p["volume"]["minimum"].as_f64(), p["volume"]["maximum"].as_f64()), (Some(0.1), Some(10.0)));
         assert_eq!(p["leftTalkgroups"]["default"], json!([]));
         assert_eq!(p["rightTalkgroups"]["type"], "array");
+        // The recorder's Talkgroups menu, and its lists only where they apply.
+        assert_eq!(p["talkgroupMode"]["enum"], json!(["all", "only", "allBut"]));
+        assert_eq!(p["talkgroupMode"]["default"], "all");
+        assert_eq!(p["talkgroupAllow"]["x-when"], json!({ "talkgroupMode": "only" }));
+        assert_eq!(p["talkgroupDeny"]["x-when"], json!({ "talkgroupMode": ["only", "allBut"] }));
+        for list in ["talkgroupAllow", "talkgroupDeny", "leftTalkgroups", "rightTalkgroups"] {
+            assert_eq!(p[list]["x-talkgroups"], true, "{list}");
+            assert_eq!(p[list]["items"]["type"], "string", "{list}");
+        }
+        // 0.4.0's lists are read, not shown.
+        assert!(p.get("talkgroups").is_none() && p.get("excludeTalkgroups").is_none());
         assert_eq!(f["required"], json!(["server", "mount", "password"]));
     }
 
@@ -792,6 +881,82 @@ mod tests {
         let out = run(m);
         assert_eq!(played(&out), 2, "{:?}", out.messages);
         assert!(server.wait(|c| c.first().is_some_and(|c| c.closed))[0].body.len() > 100);
+    }
+
+    /// The talkgroups that play on a feed of these settings, of 101, 102, 202, 1000, 1050 and 2000.
+    fn playing(settings: Value) -> Vec<u32> {
+        let tgs = [101, 102, 202, 1000, 1050, 2000];
+        let server = fake::Server::ok();
+        let mut on = Vec::new();
+        for (id, tg) in (1..).zip(tgs) {
+            let mut m = vec![hello(json!([feed(server.port, settings.clone())]))];
+            m.extend(whole(call(id, tg)));
+            let out = run(m);
+            assert!(out.ready(), "{settings}: {:?}", out.status());
+            if played(&out) == 1 {
+                on.push(tg);
+            }
+        }
+        on
+    }
+
+    #[test]
+    fn talkgroups_chosen_in_the_menu() {
+        assert_eq!(playing(json!({ "talkgroupMode": "all" })), [101, 102, 202, 1000, 1050, 2000]);
+        assert_eq!(playing(json!({})), [101, 102, 202, 1000, 1050, 2000], "no choice: every talkgroup");
+        // A range typed with spaces, and one of it left out.
+        let only = json!({ "talkgroupMode": "only", "talkgroupAllow": ["1000 - 1099", 101], "talkgroupDeny": [1050] });
+        assert_eq!(playing(only), [101, 1000]);
+        // The allow list is kept, hidden, but doesn't apply to "All but some".
+        assert_eq!(playing(json!({ "talkgroupMode": "allBut", "talkgroupAllow": ["1*"], "talkgroupDeny": ["10??", "202"] })), [101, 102, 2000]);
+        // Talkgroups on a side play with "Only some"; with "Every talkgroup", they're only placed.
+        assert_eq!(playing(json!({ "talkgroupMode": "only", "talkgroupAllow": [101], "leftTalkgroups": ["2000"] })), [101, 2000]);
+        assert_eq!(playing(json!({ "talkgroupMode": "only", "rightTalkgroups": ["1000-1099"] })), [1000, 1050]);
+        assert_eq!(playing(json!({ "talkgroupMode": "all", "leftTalkgroups": [101] })), [101, 102, 202, 1000, 1050, 2000]);
+    }
+
+    #[test]
+    fn the_menu_is_logged_in_its_words() {
+        let server = fake::Server::ok();
+        let f =
+            feed(server.port, json!({ "talkgroupMode": "only", "talkgroupAllow": ["1000 - 1099"], "talkgroupDeny": [1050], "leftTalkgroups": ["101 102"] }));
+        let out = run(vec![hello(json!([f]))]);
+        assert!(out.logs().iter().any(|(_, l)| l.contains("only 1000-1099, 101, 102; except 1050, 101, 102 on the left")), "{:?}", out.logs());
+        assert!(!out.logs().iter().any(|(_, l)| l.contains("earlier version")), "{:?}", out.logs());
+    }
+
+    #[test]
+    fn talkgroups_saved_by_0_4_still_apply() {
+        assert_eq!(playing(json!({ "talkgroups": ["1*"], "excludeTalkgroups": [102] })), [101, 1000, 1050]);
+        assert_eq!(playing(json!({ "excludeTalkgroups": ["1*"] })), [202, 2000], "Leave out alone: all but those");
+        assert_eq!(playing(json!({ "leftTalkgroups": ["101"], "rightTalkgroups": ["202"] })), [101, 202], "sides alone: just theirs");
+        // A choice in the menu wins over lists left from before.
+        assert_eq!(playing(json!({ "talkgroupMode": "all", "talkgroups": ["101"] })), [101, 102, 202, 1000, 1050, 2000]);
+        assert_eq!(playing(json!({ "talkgroupMode": "only", "talkgroupAllow": ["202"], "talkgroups": ["101"] })), [202]);
+        // And the log says to choose the menu.
+        let server = fake::Server::ok();
+        let out = run(vec![hello(json!([feed(server.port, json!({ "talkgroups": ["101"] }))]))]);
+        let said = out.logs().into_iter().find(|(_, l)| l.contains("earlier version")).expect("a warning");
+        assert_eq!(said.0, Level::Warn);
+        assert!(said.1.starts_with("Feed County: playing the talkgroups saved by an earlier version (only 101); choose Talkgroups"), "{said:?}");
+    }
+
+    #[test]
+    fn a_bad_talkgroup_stops_the_plugin() {
+        let cases = [
+            (json!({ "talkgroupMode": "only", "talkgroupAllow": ["10OO"] }), "Feed County: talkgroups: \"10OO\" isn't a talkgroup"),
+            (json!({ "talkgroupMode": "allBut", "talkgroupDeny": ["5a*"] }), "Feed County: talkgroups: \"5a*\" isn't a talkgroup"),
+            (json!({ "leftTalkgroups": ["x"] }), "Feed County: talkgroups on the left: \"x\" isn't a talkgroup"),
+            (json!({ "rightTalkgroups": ["10-"] }), "Feed County: talkgroups on the right: \"10-\" isn't a talkgroup"),
+            (json!({ "talkgroups": ["abc"] }), "Feed County: talkgroups: \"abc\" isn't a talkgroup"),
+            (json!({ "talkgroupMode": "only" }), "Feed County: talkgroups: list the talkgroups for \"Only some\""),
+        ];
+        for (settings, says) in cases {
+            let out = run(vec![hello(json!([feed(8000, settings.clone())]))]);
+            assert_eq!(out.exit_code, EXIT_CONFIG, "{settings}");
+            let (_, msg) = out.status().unwrap();
+            assert!(msg.starts_with(says), "{settings}: {msg}");
+        }
     }
 
     #[test]
