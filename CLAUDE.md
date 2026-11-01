@@ -85,6 +85,7 @@ run a local Icecast server and point the plugin at it.
 
 ## Release
 
+- **GitHub is a push mirror, not the working repo.** `origin` is the canonical repo; the GitHub copy is force-pushed from it on every push. Never push, merge a PR, or tag on GitHub: anything done there is overwritten at the next sync. To take a GitHub PR, fetch its branch, merge it into `origin`, and let the mirror carry it back. Tags pushed to `origin` reach GitHub through the mirror, which is what triggers the release workflow there.
 - Update the version in Cargo.toml, then `git tag vX.Y.Z && git push --tags`.
 - The release workflow builds Linux, macOS, and Windows binaries.
 - Add a `## [X.Y.Z]` section to CHANGELOG.md for each version. The workflow uses it as the release notes.
