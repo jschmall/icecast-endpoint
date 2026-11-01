@@ -196,5 +196,18 @@ then `cargo test -- --ignored`.
 
 ## License
 
-MIT. The plugin includes the [LAME](https://lame.sourceforge.io) MP3 encoder,
-which is under the LGPL.
+The plugin itself is under the MIT license (see [LICENSE](LICENSE)).
+
+It statically includes the [LAME](https://lame.sourceforge.io) MP3 encoder, through the
+[mp3lame-sys](https://github.com/DoumanAsh/mp3lame-sys) and
+[mp3lame-encoder](https://github.com/DoumanAsh/mp3lame-encoder) crates, under the
+GNU Lesser General Public License v3.0. The LGPL-3.0 text, and the GPL-3.0 text it builds on, are in
+[licenses/](licenses/). LAME's source is available from https://lame.sourceforge.io and, as built
+into this plugin, from the mp3lame-sys repository (https://github.com/DoumanAsh/mp3lame-sys).
+
+You can rebuild the plugin from this source with `cargo build --release`, to replace the LAME
+build it includes with your own (for example, a modified mp3lame-sys).
+
+The licenses and notices of every other dependency are in
+[THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md). Release packages include LICENSE,
+THIRD-PARTY-LICENSES.md and the licenses/ directory.

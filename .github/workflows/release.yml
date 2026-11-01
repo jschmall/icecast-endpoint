@@ -1,7 +1,8 @@
 # Push a tag v<version> (the version in Cargo.toml) to build the plugin for
 # every platform Trunk Recorder Pro runs on and publish a GitHub release:
 #
-#   <id>-<version>-<target>.tar.gz   (.zip on Windows) the executable, README, LICENSE
+#   <id>-<version>-<target>.tar.gz   (.zip on Windows) the executable, README, LICENSE,
+#                                    THIRD-PARTY-LICENSES.md and licenses/ (LGPL-3.0, GPL-3.0)
 #   <id>-<version>.manifest.json     what `<id> --describe` prints
 #   SHA256SUMS                       what the registry pins
 #
@@ -97,7 +98,8 @@ jobs:
         run: |
           name="$ID-$VERSION-${{ matrix.target }}"
           mkdir -p "pkg/$name" dist
-          cp "$BIN" README.md LICENSE "pkg/$name/"
+          cp "$BIN" README.md LICENSE THIRD-PARTY-LICENSES.md "pkg/$name/"
+          cp -R licenses "pkg/$name/"
           if [ "$RUNNER_OS" = Windows ]; then
             (cd pkg && 7z a -tzip "../dist/$name.zip" "$name" >/dev/null)
           else

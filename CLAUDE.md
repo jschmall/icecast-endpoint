@@ -88,6 +88,7 @@ run a local Icecast server and point the plugin at it.
 - Update the version in Cargo.toml, then `git tag vX.Y.Z && git push --tags`.
 - The release workflow builds Linux, macOS, and Windows binaries.
 - Add a `## [X.Y.Z]` section to CHANGELOG.md for each version. The workflow uses it as the release notes.
+- Whenever dependencies change, regenerate THIRD-PARTY-LICENSES.md with `cargo about generate --offline about.hbs -o THIRD-PARTY-LICENSES.md` (tool: `cargo install cargo-about --locked --features cli`; not a Cargo.toml dependency) and commit it.
 - Registry submission: see the template's registry.md.
 
 ## Working agreement
