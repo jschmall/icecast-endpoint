@@ -400,6 +400,11 @@ impl Health {
         Health { host, feeds: Default::default(), reported: Default::default(), pending: Default::default() }
     }
 
+    /// The feeds start again (new settings): what they were up to is forgotten.
+    pub fn forget_feeds(&self) {
+        self.feeds.lock().unwrap().clear();
+    }
+
     /// A call went to `feeds` feeds: its result waits for each to finish it, and for its files.
     pub fn routed(&self, id: u32, feeds: usize) {
         let mut p = self.pending.lock().unwrap();

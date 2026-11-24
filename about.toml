@@ -7,4 +7,8 @@ accepted = [
     "Unicode-3.0",
     "LGPL-3.0",
     "LGPL-3.0-only",
+    # ureq's TLS (rustls): rustls-webpki and untrusted, subtle, and Mozilla's root certificates (webpki-roots).
+    "ISC",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
 ]

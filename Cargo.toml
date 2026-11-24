@@ -2,7 +2,7 @@
 # Your plugin's id: lowercase letters, digits and dashes. It names the
 # executable, the release files and the plugin's entry in the registry.
 name = "icecast-endpoint"
-version = "0.5.4"
+version = "0.6.0"
 edition = "2024"
 description = "Allows for an Icecast mount, such as Broadcastify, to be used as an audio endpoint."
 license = "MIT"
@@ -19,6 +19,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # MP3 encoding: LAME 3.100, built from source into the binary (LGPL).
 mp3lame-encoder = "0.2.5"
+# HTTPS for filling in a feed from a Broadcastify account. Pure-Rust TLS (rustls), so the release
+# builds cross-compile; proxies from HTTPS_PROXY / ALL_PROXY.
+ureq = "3"
 
 [profile.release]
 strip = true

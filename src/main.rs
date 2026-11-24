@@ -2,6 +2,7 @@
 //! calls as they're recorded to an Icecast mount, such as a Broadcastify
 //! feed: one continuous MP3 stream per feed, with silence between calls.
 
+mod broadcastify;
 mod encode;
 mod feed;
 mod icecast;
@@ -11,13 +12,15 @@ mod resample;
 mod schedule;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::{Value, json};
 use trunk_recorder_plugin::filter::{TalkgroupMode, patterns, talkgroup_list};
-use trunk_recorder_plugin::{AudioChunk, CallInfo, ConcludedCall, Host, Manifest, Plugin, Setup, TalkgroupFilter, Talkgroups, topic};
+use trunk_recorder_plugin::{Action, AudioChunk, CallInfo, ConcludedCall, Host, Manifest, Plugin, Reply, Setup, TalkgroupFilter, Talkgroups, topic};
 
 use encode::Mp3;
 use feed::{Feed, Health, Msg, Pan};
@@ -25,13 +28,43 @@ use icecast::{Protocol, StreamInfo, Target};
 
 #[derive(Serialize, Deserialize, JsonSchema, Default, PartialEq)]
 #[serde(default)]
+#[schemars(extend("x-actions" = [{
+    "id": FILL_IN,
+    "label": "Fill in from Broadcastify",
+    "hint": "Logs in with the Broadcastify username and password above and fills in your feed's server, mount and password. The recorder has to be recording."
+}]))]
 struct Config {
     /// Feeds
     ///
     /// The Icecast mounts to stream to, such as your Broadcastify feeds, and which calls each plays.
     #[serde(deserialize_with = "feeds")]
     feeds: Vec<FeedConfig>,
+    /// Broadcastify username
+    ///
+    /// To fill in a feed from your Broadcastify account: your Broadcastify username and password, then Fill in from Broadcastify. The password is cleared once the feed is filled in.
+    #[serde(rename = "broadcastifyUsername")]
+    broadcastify_username: String,
+    /// Broadcastify password
+    #[serde(rename = "broadcastifyPassword")]
+    #[schemars(extend("x-secret" = true))]
+    broadcastify_password: String,
+    /// Broadcastify feed ID
+    ///
+    /// With more than one feed on the account: the one to fill in (its number, as in broadcastify.com/listen/feed/38565).
+    #[serde(rename = "broadcastifyFeedId")]
+    broadcastify_feed_id: Option<u32>,
+    /// Where an account's feeds come from: Broadcastify's, unless testing against another server.
+    #[serde(rename = "broadcastifyApi", skip_serializing_if = "String::is_empty")]
+    #[schemars(skip)]
+    broadcastify_api: String,
 }
+
+/// The button that fills in a feed from a Broadcastify account.
+const FILL_IN: &str = "broadcastify";
+
+/// Replies waiting for their settings to be saved: by the save's request, the reply, what to say
+/// once saved, and what to say if they can't be.
+type Pending = Arc<Mutex<HashMap<u64, (Reply, String, String)>>>;
 
 /// Feed
 #[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -294,6 +327,12 @@ struct IcecastEndpoint {
     /// The calls routed, until their files are written.
     routed: HashMap<u32, Routed>,
     health: Health,
+    host: Host,
+    /// Where a Broadcastify account's feeds come from.
+    api: String,
+    /// Fill in from Broadcastify: the presses being answered, and their replies waiting on a save.
+    workers: Vec<JoinHandle<()>>,
+    pending: Pending,
 }
 
 impl Plugin for IcecastEndpoint {
@@ -304,6 +343,10 @@ impl Plugin for IcecastEndpoint {
         Manifest {
             name: "Icecast Endpoint".into(),
             subscribe: vec![topic::AUDIO.into(), topic::CALL_START.into(), topic::CALL_END.into(), topic::CALL_CONCLUDED.into()],
+            // New settings restart the feeds, not the plugin: a feed filled in from Broadcastify
+            // is saved by the plugin itself (settings.save), which only a plugin taking settings
+            // as it runs may do.
+            live_settings: true,
             // A system can have feeds of its own (for it alone; see start).
             system_overrides: vec!["feeds".into()],
             // The id, version, description, … come from Cargo.toml.
@@ -312,77 +355,78 @@ impl Plugin for IcecastEndpoint {
     }
 
     fn start(host: Host, setup: Setup<Config, Self::SystemConfig>) -> Result<Self, String> {
-        // Systems can override the feeds: theirs are for them alone.
-        let own: Vec<(&str, &Vec<FeedConfig>)> =
-            setup.systems.iter().filter(|s| s.settings.feeds != setup.config.feeds).map(|s| (s.short_name.as_str(), &s.settings.feeds)).collect();
-        if setup.config.feeds.is_empty() && own.iter().all(|(_, v)| v.is_empty()) {
-            return Err("Add a feed: the Icecast server and mount to stream to, such as your Broadcastify feed's.".into());
-        }
-        let not: Arc<HashSet<String>> = Arc::new(own.iter().map(|(n, _)| n.to_string()).collect());
-        // Check every feed before starting any.
-        let mut checked = Vec::new();
-        let mut counts: HashMap<Option<&str>, usize> = HashMap::new();
-        let all = setup.config.feeds.iter().map(|f| (None, f));
-        let theirs = own.iter().flat_map(|(n, v)| v.iter().map(move |f| (Some(*n), f)));
-        for (only, f) in all.chain(theirs) {
-            let i = *counts.entry(only).and_modify(|n| *n += 1).or_insert(1);
-            let which = match (only, f.name.trim()) {
-                (Some(n), "") => format!("{n}'s feed {i}"),
-                (Some(n), name) => format!("{n}'s feed {name}"),
-                (None, "") => format!("Feed {i}"),
-                (None, name) => format!("Feed {name}"),
-            };
-            let target = f.target().map_err(|e| format!("{which}: {e}"))?;
-            let filters = f.filters().map_err(|e| format!("{which}: {e}"))?;
-            if checked.iter().any(|(_, _, t, _, _): &(Option<&str>, &FeedConfig, Target, Filters, String)| {
-                t.host == target.host && t.port == target.port && t.mount == target.mount
-            }) {
-                return Err(format!("{which}: another feed streams to the same mount ({target}); a mount takes one source."));
-            }
-            checked.push((only, f, target, filters, which));
+        let planned = plan(&host, &setup)?;
+        if planned.is_empty() {
+            host.warn("No feeds yet: add one, or fill one in from your Broadcastify account (Fill in from Broadcastify).");
         }
         let health = Health::new(host.clone());
-        let mut routes = Vec::new();
-        for (only, f, target, Filters { plays: filter, left, right, old }, which) in checked {
-            if !f.system.is_empty() && setup.system_named(&f.system).is_none() {
-                host.warn(format!("{which}: there's no system called {}", f.system));
+        let routes = launch(planned, &health)?;
+        let api = api_of(&setup.config);
+        Ok(IcecastEndpoint {
+            routes,
+            calls: HashMap::new(),
+            playing: HashMap::new(),
+            early: HashMap::new(),
+            routed: HashMap::new(),
+            health,
+            host,
+            api,
+            workers: Vec::new(),
+            pending: Pending::default(),
+        })
+    }
+
+    /// New settings (the plugin takes them as it runs): the feeds start again with them, once
+    /// they're all good; a mistake leaves the feeds as they were.
+    fn settings(&mut self, setup: Setup<Config, Self::SystemConfig>) -> Result<(), String> {
+        let planned = plan(&self.host, &setup)?;
+        self.api = api_of(&setup.config);
+        // The calls playing end on the feeds as they were (the next calls go to the new ones).
+        for (id, (routes, _)) in self.playing.drain() {
+            for r in routes {
+                self.routes[r].feed.send(Msg::End { id });
             }
-            if old {
-                host.warn(format!(
-                    "{which}: playing the talkgroups saved by an earlier version ({}); choose Talkgroups on the feed to see and change them",
-                    if filter.is_empty() { "every talkgroup".to_string() } else { filter.describe() }
-                ));
-            }
-            let name = if f.name.trim().is_empty() { target.to_string() } else { format!("{} ({target})", f.name.trim()) };
-            let of = match (only, f.system.as_str()) {
-                (Some(n), _) | (None, n) if !n.is_empty() => format!(" of {n}"),
-                _ => String::new(),
-            };
-            let tgs = if filter.is_empty() { "every talkgroup".to_string() } else { filter.describe() };
-            let mut sides = String::new();
-            for (side, s) in [("left", &f.left_talkgroups), ("right", &f.right_talkgroups)] {
-                // Checked by filters(): the list as read.
-                let s = talkgroup_list(s).unwrap_or_default();
-                if !s.is_empty() {
-                    sides += &format!(", {} on the {side}", s.join(", "));
-                }
-            }
-            let channels = if f.stereo() { "stereo" } else { "mono" };
-            let volume = if f.volume == 1.0 { String::new() } else { format!(", volume ×{}", f.volume) };
-            host.info(format!("feed {name}: {tgs}{of}{sides}, {} kbps {channels} at {} Hz{volume}", f.bitrate, f.sample_rate));
-            let settings = feed::Settings {
-                target,
-                name,
-                max_delay: Duration::from_secs(f.max_delay_seconds as u64),
-                update_title: f.update_title,
-                idle: (f.idle_seconds > 0).then(|| (Duration::from_secs(f.idle_seconds as u64), f.idle_title.trim().to_string())),
-                volume: f.volume as f32,
-            };
-            let feed = Feed::start(settings, health.clone()).map_err(|e| format!("{which}: {e}"))?;
-            let title_format = if f.title_format.trim().is_empty() { TITLE_FORMAT.to_string() } else { f.title_format.trim().to_string() };
-            routes.push(Route { feed, system: f.system.clone(), filter, left, right, only: only.map(String::from), not: not.clone(), title_format });
         }
-        Ok(IcecastEndpoint { routes, calls: HashMap::new(), playing: HashMap::new(), early: HashMap::new(), routed: HashMap::new(), health })
+        let deadline = Instant::now() + Duration::from_secs(2);
+        for r in &mut self.routes {
+            r.feed.close();
+        }
+        for r in self.routes.drain(..) {
+            r.feed.finish(deadline);
+        }
+        self.health.forget_feeds();
+        self.routes = launch(planned, &self.health)?;
+        Ok(())
+    }
+
+    /// Fill in from Broadcastify: on a thread of its own (a login over the internet), answered once
+    /// the feed is saved, or with why it couldn't be.
+    fn action(&mut self, a: Action, reply: Reply) {
+        if a.action != FILL_IN {
+            reply.fail(format!("There's no button called {}", a.action));
+            return;
+        }
+        let (api, host, pending) = (self.api.clone(), self.host.clone(), self.pending.clone());
+        self.workers.retain(|w| !w.is_finished());
+        let w = std::thread::spawn(move || match fill_in_from_broadcastify(&api, &a.value) {
+            Err(why) => reply.fail(why),
+            Ok((save, done, by_hand)) => {
+                // Kept before it's saved, so the answer finds it.
+                let mut p = pending.lock().unwrap();
+                let request = host.save_settings(&save);
+                p.insert(request, (reply, done, by_hand));
+            }
+        });
+        self.workers.push(w);
+    }
+
+    fn settings_saved(&mut self, request: u64, ok: bool, message: String) {
+        let Some((reply, done, by_hand)) = self.pending.lock().unwrap().remove(&request) else { return };
+        if ok {
+            reply.ok(done);
+        } else {
+            reply.fail(format!("The feed couldn't be saved ({message}). {by_hand}"));
+        }
     }
 
     fn call_start(&mut self, call: CallInfo) {
@@ -468,6 +512,15 @@ impl Plugin for IcecastEndpoint {
     fn shutdown(&mut self, grace: Duration) {
         let deadline = Instant::now() + grace;
         self.release_early(true);
+        // A press being answered finishes first (its reply goes before the plugin does).
+        for w in self.workers.drain(..) {
+            while !w.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if w.is_finished() {
+                let _ = w.join();
+            }
+        }
         for r in &mut self.routes {
             r.feed.close();
         }
@@ -475,6 +528,134 @@ impl Plugin for IcecastEndpoint {
             r.feed.finish(deadline);
         }
     }
+}
+
+/// A feed checked and ready to start: where it goes, what it plays, and how.
+struct Planned {
+    settings: feed::Settings,
+    which: String,
+    system: String,
+    filters: Filters,
+    only: Option<String>,
+    not: Arc<HashSet<String>>,
+    title_format: String,
+}
+
+/// Every feed the settings have, checked before any starts (and what's worth saying about each).
+fn plan(host: &Host, setup: &Setup<Config, trunk_recorder_plugin::NoConfig>) -> Result<Vec<Planned>, String> {
+    // Systems can override the feeds: theirs are for them alone.
+    let own: Vec<(&str, &Vec<FeedConfig>)> =
+        setup.systems.iter().filter(|s| s.settings.feeds != setup.config.feeds).map(|s| (s.short_name.as_str(), &s.settings.feeds)).collect();
+    let not: Arc<HashSet<String>> = Arc::new(own.iter().map(|(n, _)| n.to_string()).collect());
+    // Check every feed before starting any.
+    let mut checked = Vec::new();
+    let mut counts: HashMap<Option<&str>, usize> = HashMap::new();
+    let all = setup.config.feeds.iter().map(|f| (None, f));
+    let theirs = own.iter().flat_map(|(n, v)| v.iter().map(move |f| (Some(*n), f)));
+    for (only, f) in all.chain(theirs) {
+        let i = *counts.entry(only).and_modify(|n| *n += 1).or_insert(1);
+        let which = match (only, f.name.trim()) {
+            (Some(n), "") => format!("{n}'s feed {i}"),
+            (Some(n), name) => format!("{n}'s feed {name}"),
+            (None, "") => format!("Feed {i}"),
+            (None, name) => format!("Feed {name}"),
+        };
+        let target = f.target().map_err(|e| format!("{which}: {e}"))?;
+        let filters = f.filters().map_err(|e| format!("{which}: {e}"))?;
+        if checked.iter().any(|(_, _, t, _, _): &(Option<&str>, &FeedConfig, Target, Filters, String)| {
+            t.host == target.host && t.port == target.port && t.mount == target.mount
+        }) {
+            return Err(format!("{which}: another feed streams to the same mount ({target}); a mount takes one source."));
+        }
+        checked.push((only, f, target, filters, which));
+    }
+    let mut planned = Vec::new();
+    for (only, f, target, Filters { plays: filter, left, right, old }, which) in checked {
+        if !f.system.is_empty() && setup.system_named(&f.system).is_none() {
+            host.warn(format!("{which}: there's no system called {}", f.system));
+        }
+        if old {
+            host.warn(format!(
+                "{which}: playing the talkgroups saved by an earlier version ({}); choose Talkgroups on the feed to see and change them",
+                if filter.is_empty() { "every talkgroup".to_string() } else { filter.describe() }
+            ));
+        }
+        let name = if f.name.trim().is_empty() { target.to_string() } else { format!("{} ({target})", f.name.trim()) };
+        let of = match (only, f.system.as_str()) {
+            (Some(n), _) | (None, n) if !n.is_empty() => format!(" of {n}"),
+            _ => String::new(),
+        };
+        let tgs = if filter.is_empty() { "every talkgroup".to_string() } else { filter.describe() };
+        let mut sides = String::new();
+        for (side, s) in [("left", &f.left_talkgroups), ("right", &f.right_talkgroups)] {
+            // Checked by filters(): the list as read.
+            let s = talkgroup_list(s).unwrap_or_default();
+            if !s.is_empty() {
+                sides += &format!(", {} on the {side}", s.join(", "));
+            }
+        }
+        let channels = if f.stereo() { "stereo" } else { "mono" };
+        let volume = if f.volume == 1.0 { String::new() } else { format!(", volume ×{}", f.volume) };
+        host.info(format!("feed {name}: {tgs}{of}{sides}, {} kbps {channels} at {} Hz{volume}", f.bitrate, f.sample_rate));
+        let settings = feed::Settings {
+            target,
+            name,
+            max_delay: Duration::from_secs(f.max_delay_seconds as u64),
+            update_title: f.update_title,
+            idle: (f.idle_seconds > 0).then(|| (Duration::from_secs(f.idle_seconds as u64), f.idle_title.trim().to_string())),
+            volume: f.volume as f32,
+        };
+        let title_format = if f.title_format.trim().is_empty() { TITLE_FORMAT.to_string() } else { f.title_format.trim().to_string() };
+        let filters = Filters { plays: filter, left, right, old };
+        planned.push(Planned { settings, which, system: f.system.clone(), filters, only: only.map(String::from), not: not.clone(), title_format });
+    }
+    Ok(planned)
+}
+
+/// Start the feeds planned.
+fn launch(planned: Vec<Planned>, health: &Health) -> Result<Vec<Route>, String> {
+    let mut routes = Vec::new();
+    for p in planned {
+        let feed = Feed::start(p.settings, health.clone()).map_err(|e| format!("{}: {e}", p.which))?;
+        let Filters { plays: filter, left, right, .. } = p.filters;
+        routes.push(Route { feed, system: p.system, filter, left, right, only: p.only, not: p.not, title_format: p.title_format });
+    }
+    Ok(routes)
+}
+
+/// Where a Broadcastify account's feeds come from.
+fn api_of(c: &Config) -> String {
+    if c.broadcastify_api.trim().is_empty() { broadcastify::API.to_string() } else { c.broadcastify_api.trim().to_string() }
+}
+
+/// Fill in from Broadcastify (`value`: the settings as edited): log in, choose the feed, and fill
+/// it in. Ok: the settings to save (the password cleared), what to say once they're saved, and
+/// what to say if they can't be. Err: what to tell the user.
+fn fill_in_from_broadcastify(api: &str, value: &Value) -> Result<(Value, String, String), String> {
+    let user = value.get("broadcastifyUsername").and_then(Value::as_str).unwrap_or("").trim().to_string();
+    let password = value.get("broadcastifyPassword").and_then(Value::as_str).unwrap_or("").to_string();
+    if user.is_empty() || password.is_empty() {
+        return Err("Type your Broadcastify username and password first.".into());
+    }
+    let id =
+        value.get("broadcastifyFeedId").and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))).and_then(|n| u32::try_from(n).ok());
+    let feeds = broadcastify::feeds(api, &user, &password)?;
+    let f = broadcastify::pick(&feeds, id)?;
+    let (all, added) = broadcastify::fill_in(&value["feeds"], f);
+    let at = format!("{}:{}{}", f.host, f.port, f.mount());
+    let mut done = format!(
+        "{} feed {} ({}) at {at}. It plays every system and talkgroup until you choose (System, Talkgroups). Your Broadcastify password wasn't kept.",
+        if added { "Added" } else { "Filled in" },
+        f.id,
+        f.name.trim()
+    );
+    // A network that lets the web through may still stop the stream.
+    if let Err(why) = broadcastify::reachable(&f.host, f.port) {
+        done = format!("{done} But: {why}");
+    }
+    let by_hand =
+        format!("Add it by hand: server {}, port {}, mount {}; its password is on the feed's Technical tab at broadcastify.com.", f.host, f.port, f.mount());
+    Ok((json!({ "feeds": all, "broadcastifyPassword": null }), done, by_hand))
 }
 
 impl IcecastEndpoint {
@@ -725,7 +906,8 @@ mod tests {
     use super::*;
     use crate::icecast::fake;
     use serde_json::{Value, json};
-    use trunk_recorder_plugin::{EXIT_CONFIG, HostMessage, Level, Outcome, SystemInfo, testing};
+    use trunk_recorder_plugin::testing::{MockServer, Request};
+    use trunk_recorder_plugin::{EXIT_CONFIG, HostMessage, Level, Outcome, PluginMessage, State, SystemInfo, testing};
 
     fn call(id: u32, tg: u32) -> CallInfo {
         CallInfo {
@@ -865,6 +1047,108 @@ mod tests {
         // 0.4.0's lists are read, not shown.
         assert!(p.get("talkgroups").is_none() && p.get("excludeTalkgroups").is_none());
         assert_eq!(f["required"], json!(["server", "mount", "password"]));
+        // Fill in from Broadcastify: the login and which feed, and the button, on the whole settings.
+        let top = &c["properties"];
+        assert_eq!(top["broadcastifyPassword"]["x-secret"], true);
+        assert!(top["broadcastifyUsername"].is_object() && top["broadcastifyFeedId"].is_object());
+        assert!(top.get("broadcastifyApi").is_none(), "for testing only: not on the form");
+        assert_eq!(c["x-actions"][0]["id"], FILL_IN);
+        assert_eq!(c["x-actions"][0]["label"], "Fill in from Broadcastify");
+    }
+
+    /// Broadcastify's API, as the appliance's: an account's feeds for its username and password.
+    fn broadcastify_api(feed_host: &'static str, feed_port: u16) -> MockServer {
+        MockServer::start(move |r: &Request| {
+            let body = String::from_utf8_lossy(&r.body).to_string();
+            if !body.contains("u=me") || !body.contains("p=right") {
+                return (200, r#"{"error":true,"errorMsg":"Invalid Username or Password"}"#.into());
+            }
+            let feed = json!([{ "feedId": "38565", "feedDescr": "Augusta Fire", "mount": "abcd1234", "source_password": "s3cret", "hostname_ext": feed_host, "port_ext": feed_port.to_string() }]);
+            (200, feed.to_string())
+        })
+    }
+
+    fn login(api: &MockServer, password: &str, feeds: Value) -> Value {
+        json!({ "feeds": feeds, "broadcastifyUsername": "me", "broadcastifyPassword": password, "broadcastifyApi": api.url() })
+    }
+
+    /// Fill in from Broadcastify: the account's feed is added (or the one on its mount filled in),
+    /// to be saved with the password cleared; a feed server that can't be reached is said.
+    #[test]
+    fn a_feed_filled_in_from_broadcastify() {
+        let listening = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listening.local_addr().unwrap().port();
+        let api = broadcastify_api("127.0.0.1", port);
+        let (save, done, by_hand) = fill_in_from_broadcastify(api.url(), &login(&api, "right", json!([]))).unwrap();
+        assert_eq!(
+            save,
+            json!({ "feeds": [{ "name": "Augusta Fire", "server": "127.0.0.1", "port": port, "mount": "/abcd1234", "password": "s3cret" }], "broadcastifyPassword": null })
+        );
+        assert!(done.starts_with(&format!("Added feed 38565 (Augusta Fire) at 127.0.0.1:{port}/abcd1234.")), "{done}");
+        assert!(done.contains("password wasn't kept") && !done.contains("But:"), "{done}");
+        assert!(by_hand.contains("mount /abcd1234") && !by_hand.contains("s3cret"), "{by_hand}");
+        // What's saved makes a good feed (null removes a setting, as the recorder saves it).
+        let mut kept = save.as_object().unwrap().clone();
+        kept.retain(|_, v| !v.is_null());
+        let config: Config = serde_json::from_value(Value::Object(kept)).unwrap();
+        assert!(config.feeds[0].target().is_ok() && config.broadcastify_password.is_empty());
+        // Its server not taking connections: filled in, and said why it won't stream.
+        drop(listening);
+        let (_, done, _) = fill_in_from_broadcastify(api.url(), &login(&api, "right", json!([]))).unwrap();
+        assert!(done.contains("But: This computer couldn't connect to 127.0.0.1") && done.contains("firewall"), "{done}");
+        // Turned down, or nothing typed in.
+        assert!(fill_in_from_broadcastify(api.url(), &login(&api, "wrong", json!([]))).unwrap_err().contains("didn't accept that username and password"));
+        assert!(
+            fill_in_from_broadcastify(api.url(), &json!({ "broadcastifyUsername": "me" }))
+                .unwrap_err()
+                .contains("Type your Broadcastify username and password")
+        );
+    }
+
+    /// The button, pressed while recording: the plugin saves the feed it filled in (the password
+    /// cleared), or answers why it couldn't.
+    #[test]
+    fn the_fill_in_button() {
+        let listening = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = broadcastify_api("127.0.0.1", listening.local_addr().unwrap().port());
+        let press = |password: &str| {
+            let hello = HostMessage::Hello(testing::hello(&testing::temp_dir("icecast-endpoint"), json!({ "feeds": [], "broadcastifyApi": api.url() })));
+            let action = HostMessage::Action(Action { request: 7, action: FILL_IN.into(), value: login(&api, password, json!([])) });
+            run(vec![hello, action])
+        };
+        let out = press("right");
+        let saved = out.messages.iter().find_map(|m| if let PluginMessage::SettingsSave { settings, .. } = m { Some(settings.clone()) } else { None });
+        let saved = saved.expect("the settings saved");
+        assert_eq!(saved["feeds"][0]["mount"], "/abcd1234");
+        assert_eq!(saved["broadcastifyPassword"], Value::Null);
+        let out = press("wrong");
+        let answer =
+            out.messages.iter().find_map(|m| if let PluginMessage::ActionResult { request: 7, ok, message } = m { Some((*ok, message.clone())) } else { None });
+        let (ok, message) = answer.expect("an answer");
+        assert!(!ok && message.contains("didn't accept"), "{message}");
+        assert!(!out.messages.iter().any(|m| matches!(m, PluginMessage::SettingsSave { .. })));
+    }
+
+    /// New settings restart the feeds, not the plugin: a feed added streams, one taken away stops.
+    /// Settings with a mistake leave the feeds as they were.
+    #[test]
+    fn new_settings_restart_the_feeds() {
+        assert!(trunk_recorder_plugin::describe::<IcecastEndpoint>().live_settings);
+        let (one, two) = (fake::Server::ok(), fake::Server::ok());
+        let hello = |feeds: Value| testing::hello(&testing::temp_dir("icecast-endpoint"), json!({ "feeds": feeds }));
+        let mut msgs = vec![HostMessage::Hello(hello(json!([feed(one.port, json!({}))])))];
+        msgs.push(HostMessage::Settings(hello(json!([feed(two.port, json!({ "mount": "/other" }))]))));
+        msgs.push(HostMessage::Settings(hello(json!([feed(two.port, json!({ "mount": " " }))]))));
+        let out = run(msgs);
+        assert!(out.ready());
+        assert!(two.wait(|c| !c.is_empty()).iter().any(|c| c.head.contains("/other")), "the new feed streams");
+        assert!(one.wait(|c| c.first().is_some_and(|c| c.closed))[0].closed, "the old one stopped");
+        let errors: Vec<_> = out
+            .messages
+            .iter()
+            .filter_map(|m| if let PluginMessage::Status { state: State::Error, message } = m { Some(message.clone()) } else { None })
+            .collect();
+        assert!(errors.iter().any(|e| e.contains("new settings not taken") && e.contains("mount")), "{errors:?}");
     }
 
     #[test]
@@ -877,10 +1161,18 @@ mod tests {
         assert!(m.site_overrides.is_empty());
     }
 
+    /// With no feeds yet, the plugin starts (so a feed can be filled in from Broadcastify) and says
+    /// what to do.
+    #[test]
+    fn no_feeds_yet() {
+        let out = run(vec![hello(json!([]))]);
+        assert!(out.ready(), "{:?}", out.messages);
+        assert!(out.logs().iter().any(|l| l.1.contains("No feeds yet") && l.1.contains("Fill in from Broadcastify")), "{:?}", out.logs());
+    }
+
     #[test]
     fn bad_settings_say_what_to_fix() {
         let cases = [
-            (json!([]), "Add a feed"),
             (json!([feed(8000, json!({ "server": "" }))]), "server"),
             (json!([feed(8000, json!({ "server": "https://x.example" }))]), "https"),
             (json!([feed(8000, json!({ "server": "x.example/feed" }))]), "host name"),

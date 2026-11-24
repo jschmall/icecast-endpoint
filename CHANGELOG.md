@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.6.0]
+
+Built with trunk-recorder-plugin 0.16.1, for Trunk Recorder Pro v0.4.0 and later. Contributed by
+@blantonl (#6).
+
+### Added
+
+- **Fill in from Broadcastify.** Type your Broadcastify username and password and press **Fill in
+  from Broadcastify**: the plugin logs in to Broadcastify (`api.broadcastify.com`, as the
+  Broadcastify appliance does) and adds your feed with its server, port, mount and source password,
+  or fills in the one already streaming to that mount. The password isn't kept: it's cleared once
+  the feed is saved. With several feeds on the account, it lists them to choose from (**Broadcastify
+  feed ID**). It also checks that the computer can connect to the feed's server.
+- **It says when the network is in the way.** A city, county, school or company network often blocks
+  the login or the stream. Rather than failing, the button says what it ran into: a name the
+  network's DNS won't look up, a firewall dropping or refusing the connection, HTTPS intercepted by
+  a firewall or web filter, a block page or proxy answering in Broadcastify's place, a proxy wanting
+  a login, or a feed server it can't connect to; and to ask IT to allow outbound HTTPS to
+  api.broadcastify.com and connections to the feed's server. A proxy set for the recorder
+  (`HTTPS_PROXY`, `ALL_PROXY`) is used.
+
+### Changed
+
+- **The plugin starts with no feeds** (it said "Add a feed" and stopped), so a feed can be filled in
+  from Broadcastify. It says there are none yet.
+- **New settings restart the feeds, not the plugin** (`live_settings`): the plugin saves the feed it
+  fills in itself, which only a plugin taking settings as it runs may do. Feeds reconnect, as they
+  did when the plugin restarted; settings with a mistake leave the feeds as they were.
+- Dependencies: ureq 3 (HTTPS, rustls), for the Broadcastify login. THIRD-PARTY-LICENSES.md adds
+  its licenses (ISC, BSD-3-Clause, CDLA-Permissive-2.0 for Mozilla's root certificates).
+
 ## [0.5.4]
 
 Built with trunk-recorder-plugin 0.16.1, for Trunk Recorder Pro v0.4.0 and later. Contributed by
