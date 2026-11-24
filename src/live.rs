@@ -39,7 +39,7 @@ fn target(mount: &str, protocol: Protocol) -> Target {
 
 fn start(t: Target, update_title: bool) -> (Feed, testing::Captured) {
     let (host, captured) = testing::capture();
-    let s = Settings { name: format!("Live test ({t})"), target: t, max_delay: Duration::from_secs(60), update_title, volume: 1.0 };
+    let s = Settings { name: format!("Live test ({t})"), target: t, max_delay: Duration::from_secs(60), update_title, idle: None, volume: 1.0 };
     (Feed::start(s, Health::new(host)).unwrap(), captured)
 }
 
@@ -184,6 +184,49 @@ fn the_title_follows_the_call() {
     }
     assert_eq!(title, "Fire Dispatch (101)");
     feed.finish(soon());
+}
+
+/// The mount's title once it's `want`, or what it is after five seconds.
+fn title_becomes(mount: &str, want: &str) -> Value {
+    let until = soon();
+    let mut title = Value::Null;
+    while Instant::now() < until {
+        title = source(mount).unwrap()["title"].clone();
+        if title == want || want.is_empty() && title.is_null() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    title
+}
+
+/// Quiet for long enough, Icecast is told the idle title, or an empty one, which clears it.
+#[test]
+#[ignore]
+fn the_title_says_when_its_quiet() {
+    for (mount, quiet) in [("/live-quiet", "Scanning"), ("/live-quiet-empty", "")] {
+        let (host, _) = testing::capture();
+        let t = target(mount, Protocol::Auto);
+        let s = Settings {
+            name: format!("Live test ({t})"),
+            target: t,
+            max_delay: Duration::from_secs(60),
+            update_title: true,
+            idle: Some((Duration::from_millis(500), quiet.into())),
+            volume: 1.0,
+        };
+        let feed = Feed::start(s, Health::new(host)).unwrap();
+        assert!(source(mount).is_some());
+        feed.send(Msg::Start { id: 1, title: "Fire Dispatch (101)".into(), pan: Pan::Center });
+        for _ in 0..50 {
+            feed.send(Msg::Audio { id: 1, rate: 8000, samples: vec![1000; 160] });
+        }
+        assert_eq!(title_becomes(mount, "Fire Dispatch (101)"), "Fire Dispatch (101)");
+        feed.send(Msg::End { id: 1 });
+        let after = title_becomes(mount, quiet);
+        assert!(after == quiet || quiet.is_empty() && after.is_null(), "{mount}: {after}");
+        feed.finish(soon());
+    }
 }
 
 #[test]

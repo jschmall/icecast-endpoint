@@ -65,6 +65,9 @@ filled in.
 | Except these | With **Only some** or **All but some**: talkgroups the feed never plays. |
 | Talkgroups on the left, Talkgroups on the right | Talkgroups heard in only one ear. See [Stereo](#stereo). |
 | Show the talkgroup as the title | Turns on alpha tags for the stream: its title shows the talkgroup playing, such as "Fire Dispatch (101)", using the recorder's alpha tag for that talkgroup. Off by default. Not every server accepts titles. |
+| Title | What the title says: `{alias}` (the talkgroup's alpha tag), `{talkgroup}` (its number) and `{system}`. Default: `{alias} ({talkgroup})`, "Fire Dispatch (101)". `{alias}` alone leaves off the number; `{system} - {alias}` names the system too. A talkgroup with no alpha tag shows as "Talkgroup 101". |
+| Title when quiet | The title once nothing has played for **Quiet after** seconds, so listeners don't see the last call's talkgroup during a quiet stretch. Empty (the default) clears the title; or say what the feed is, such as "Scanning". |
+| Quiet after (seconds) | How long after the last call the title changes to **Title when quiet**. Default: 5. 0 keeps the last call's title until the next call. |
 | Stream name, Description, Genre, Website | What listeners see about the stream. Stream name defaults to the feed's Name. |
 | List publicly | Asks the server to list the stream in its public directory. Leave it off for Broadcastify. |
 | Longest delay (seconds) | Calls that happen at the same time play one after another (on a stereo feed, each side on its own). When more than this much audio is waiting, the oldest waiting call is dropped. Default: 60. For a feed meant to sound live, 10 to 15 keeps it close to real time. |
@@ -131,7 +134,8 @@ becomes stereo:
   over everything.
 
 With **Show the talkgroup as the title** on, the title is the call that began
-playing last.
+playing last, and **Title when quiet** once none has played for **Quiet after**
+seconds.
 
 ### Broadcastify
 

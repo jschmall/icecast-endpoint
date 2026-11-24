@@ -43,6 +43,9 @@ pub struct Settings {
     pub name: String,
     pub max_delay: Duration,
     pub update_title: bool,
+    /// With titles: after this long with nothing playing, the title becomes this (empty: cleared).
+    /// None: the last call's title stays.
+    pub idle: Option<(Duration, String)>,
     /// How much louder (or quieter) than recorded: 1 is as recorded.
     pub volume: f32,
 }
@@ -115,7 +118,7 @@ impl Feed {
 }
 
 fn run(s: Settings, rx: Receiver<Msg>, health: &Health, stop: &AtomicBool) {
-    let Settings { target, name, max_delay, update_title, volume } = s;
+    let Settings { target, name, max_delay, update_title, idle, volume } = s;
     let (rate, kbps, stereo) = (target.info.rate, target.info.kbps, target.info.stereo);
     let Ok(mut enc) = Mp3::new(rate, kbps, stereo) else { return };
     let mut mix = Mix::new(rate, max_delay, stereo, volume);
@@ -128,6 +131,8 @@ fn run(s: Settings, rx: Receiver<Msg>, health: &Health, stop: &AtomicBool) {
     // The title on the server, and the one it should have: that of the call that began playing last.
     let (mut title, mut want): (Option<String>, Option<String>) = (None, None);
     let mut seen: Vec<Option<String>> = vec![None; mix.lanes.len()];
+    // Since when nothing has played (None: something is).
+    let mut quiet_since: Option<Instant> = Some(Instant::now());
     let title_busy = Arc::new(AtomicBool::new(false));
     let title_warned = Arc::new(AtomicBool::new(false));
     let (mut left, mut right) = (Vec::new(), Vec::new());
@@ -234,6 +239,19 @@ fn run(s: Settings, rx: Receiver<Msg>, health: &Health, stop: &AtomicBool) {
                 if playing != *seen {
                     *seen = playing.clone();
                     want = playing.or(want.take());
+                }
+            }
+            // Quiet for long enough: the title stops naming the last call.
+            // (A call is playing from when it's first in line, as its title is.)
+            if mix.lanes.iter().any(|l| l.playing().is_some() || l.playing_id().is_some()) {
+                quiet_since = None;
+            } else {
+                let since = *quiet_since.get_or_insert(tick);
+                if let Some((after, quiet)) = &idle
+                    && tick.duration_since(since) >= *after
+                {
+                    // Cleared with a space: Icecast 2.5 ignores an empty title (2.4 clears on either).
+                    want = Some(if quiet.is_empty() { " ".to_string() } else { quiet.clone() });
                 }
             }
             if want.is_some() && want != title && !title_busy.swap(true, Ordering::Relaxed) {
@@ -524,7 +542,7 @@ mod tests {
             protocol: Protocol::Auto,
             info: StreamInfo { name: "County".into(), rate: 22050, kbps: 16, ..Default::default() },
         };
-        Settings { name: format!("County (127.0.0.1:{port}/feed)"), target, max_delay: Duration::from_secs(60), update_title: false, volume: 1.0 }
+        Settings { name: format!("County (127.0.0.1:{port}/feed)"), target, max_delay: Duration::from_secs(60), update_title: false, idle: None, volume: 1.0 }
     }
 
     fn soon() -> Instant {
@@ -622,6 +640,52 @@ mod tests {
         feed.finish(soon());
         let title = c.iter().find(|c| c.head.starts_with("GET")).expect("a title update");
         assert!(title.head.contains("song=Fire%20Dispatch%20%28101%29"), "{}", title.head);
+    }
+
+    /// The titles sent, in order.
+    fn titles_sent(c: &[fake::Conn]) -> Vec<String> {
+        c.iter().filter_map(|c| c.head.split("&song=").nth(1)).map(|t| t.split(' ').next().unwrap_or_default().to_string()).collect()
+    }
+
+    /// Quiet for long enough, the title stops naming the last call: it says the idle title, or is
+    /// cleared. The next call names itself again.
+    #[test]
+    fn the_title_says_when_its_quiet() {
+        for (quiet, sent) in [("Scanning", "Scanning"), ("", "%20")] {
+            let server = fake::Server::ok();
+            let (host, _) = testing::capture();
+            let s = Settings { update_title: true, idle: Some((Duration::from_millis(300), quiet.into())), ..settings(server.port) };
+            let feed = Feed::start(s, Health::new(host)).unwrap();
+            feed.send(Msg::Start { id: 1, title: "Fire Dispatch (101)".into(), pan: Pan::Center });
+            feed.send(Msg::Audio { id: 1, rate: 8000, samples: tone(800) });
+            feed.send(Msg::End { id: 1 });
+            let after = |c: &[fake::Conn]| {
+                let t = titles_sent(c);
+                t.iter().position(|t| t.starts_with("Fire")).is_some_and(|i| t[i + 1..].iter().any(|t| t == sent))
+            };
+            server.wait(|c| after(c));
+            feed.send(Msg::Start { id: 2, title: "EMS".into(), pan: Pan::Center });
+            feed.send(Msg::Audio { id: 2, rate: 8000, samples: tone(8000) });
+            let c = server.wait(|c| titles_sent(c).last().is_some_and(|t| t == "EMS"));
+            feed.finish(soon());
+            assert!(after(&c), "{quiet:?}: {:?}", titles_sent(&c));
+            assert_eq!(titles_sent(&c).last().map(String::as_str), Some("EMS"), "the next call names itself");
+        }
+    }
+
+    /// With no quiet time, the last call's title stays.
+    #[test]
+    fn the_last_title_stays_unless_asked() {
+        let server = fake::Server::ok();
+        let (host, _) = testing::capture();
+        let feed = Feed::start(Settings { update_title: true, ..settings(server.port) }, Health::new(host)).unwrap();
+        feed.send(Msg::Start { id: 1, title: "Fire Dispatch (101)".into(), pan: Pan::Center });
+        feed.send(Msg::Audio { id: 1, rate: 8000, samples: tone(800) });
+        feed.send(Msg::End { id: 1 });
+        server.wait(|c| !titles_sent(c).is_empty());
+        std::thread::sleep(Duration::from_millis(500));
+        feed.finish(soon());
+        assert_eq!(titles_sent(&server.conns()), ["Fire%20Dispatch%20%28101%29"]);
     }
 
     #[test]

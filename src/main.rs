@@ -107,6 +107,19 @@ struct FeedConfig {
     ///
     /// Set the stream's title to the talkgroup playing. Not every server takes titles from a source.
     update_title: bool,
+    /// Title
+    ///
+    /// What the title says: {alias} (the talkgroup's alpha tag), {talkgroup} (its number) and {system}. {alias} alone leaves off the number. A talkgroup with no alias shows as Talkgroup 101.
+    title_format: String,
+    /// Title when quiet
+    ///
+    /// The title once nothing has played for a while. Leave it empty to clear the title, or say what the feed is (Scanning).
+    idle_title: String,
+    /// Quiet after (seconds)
+    ///
+    /// How long after the last call the title changes to the one above. 0 keeps the last call's title.
+    #[schemars(range(min = 0, max = 3600))]
+    idle_seconds: u32,
     /// Stream name
     ///
     /// What listeners see the stream called. Leave it empty to use the feed's name.
@@ -184,6 +197,9 @@ impl Default for FeedConfig {
             left_talkgroups: Vec::new(),
             right_talkgroups: Vec::new(),
             update_title: false,
+            title_format: TITLE_FORMAT.into(),
+            idle_title: String::new(),
+            idle_seconds: 5,
             stream_name: String::new(),
             description: String::new(),
             genre: "Scanner".into(),
@@ -224,6 +240,8 @@ struct Route {
     only: Option<String>,
     /// The systems with feeds of their own, which the plugin's feeds aren't for.
     not: Arc<HashSet<String>>,
+    /// What its title says ([`Title::render`]).
+    title_format: String,
 }
 
 impl Route {
@@ -357,10 +375,12 @@ impl Plugin for IcecastEndpoint {
                 name,
                 max_delay: Duration::from_secs(f.max_delay_seconds as u64),
                 update_title: f.update_title,
+                idle: (f.idle_seconds > 0).then(|| (Duration::from_secs(f.idle_seconds as u64), f.idle_title.trim().to_string())),
                 volume: f.volume as f32,
             };
             let feed = Feed::start(settings, health.clone()).map_err(|e| format!("{which}: {e}"))?;
-            routes.push(Route { feed, system: f.system.clone(), filter, left, right, only: only.map(String::from), not: not.clone() });
+            let title_format = if f.title_format.trim().is_empty() { TITLE_FORMAT.to_string() } else { f.title_format.trim().to_string() };
+            routes.push(Route { feed, system: f.system.clone(), filter, left, right, only: only.map(String::from), not: not.clone(), title_format });
         }
         Ok(IcecastEndpoint { routes, calls: HashMap::new(), playing: HashMap::new(), early: HashMap::new(), routed: HashMap::new(), health })
     }
@@ -371,7 +391,7 @@ impl Plugin for IcecastEndpoint {
         // A call not recorded here has no audio of its own; another site's copy may,
         // and is routed when its audio comes (as this call).
         if call.recording {
-            self.route(call.id, &call.short_name, &talkgroups(&call), title(&call), skip(&call), call.start_time);
+            self.route(call.id, &call.short_name, &talkgroups(&call), Title::of(&call), skip(&call), call.start_time);
         }
         // Audio that came before it, perhaps as another site's copy: the call's.
         let of = |id: u32, e: &Early| id == call.id || e.chunks.first().is_some_and(|c| c.short_name == call.short_name && c.talkgroup == call.talkgroup);
@@ -462,8 +482,10 @@ impl IcecastEndpoint {
     fn play(&mut self, id: u32, chunk: AudioChunk) {
         if !self.playing.contains_key(&id) {
             let (tgs, t, s, start) = match self.calls.get(&id) {
-                Some(c) => (talkgroups(c), title(c), skip(c), c.start_time),
-                None => (vec![chunk.talkgroup], format!("Talkgroup {}", chunk.talkgroup), false, unix_now()),
+                Some(c) => (talkgroups(c), Title::of(c), skip(c), c.start_time),
+                None => {
+                    (vec![chunk.talkgroup], Title { alias: String::new(), talkgroup: chunk.talkgroup, system: chunk.short_name.clone() }, false, unix_now())
+                }
             };
             self.route(id, &chunk.short_name, &tgs, t, s, start);
         }
@@ -490,7 +512,7 @@ impl IcecastEndpoint {
     }
 
     /// Start a call on the feeds that play it, and remember which.
-    fn route(&mut self, id: u32, short_name: &str, talkgroups: &[u32], title: String, skip: bool, start: f64) {
+    fn route(&mut self, id: u32, short_name: &str, talkgroups: &[u32], title: Title, skip: bool, start: f64) {
         if self.playing.contains_key(&id) {
             return;
         }
@@ -503,7 +525,8 @@ impl IcecastEndpoint {
         self.routed.insert(id, routed);
         for &r in &routes {
             let pan = pan(&self.routes[r].left, &self.routes[r].right, talkgroups);
-            self.routes[r].feed.send(Msg::Start { id, title: title.clone(), pan });
+            let title = title.render(&self.routes[r].title_format);
+            self.routes[r].feed.send(Msg::Start { id, title, pan });
         }
         self.playing.insert(id, (routes, Instant::now()));
     }
@@ -642,11 +665,31 @@ fn talkgroups(c: &CallInfo) -> Vec<u32> {
     v
 }
 
-/// What the stream's title says while the call plays.
-fn title(c: &CallInfo) -> String {
-    match c.talkgroup_tag.trim() {
-        "" => format!("Talkgroup {}", c.talkgroup),
-        tag => format!("{tag} ({})", c.talkgroup),
+/// A feed's title unless it says otherwise: "Fire Dispatch (101)".
+const TITLE_FORMAT: &str = "{alias} ({talkgroup})";
+
+/// What the stream's title says while a call plays, before a feed's format.
+#[derive(Clone, Debug, PartialEq)]
+struct Title {
+    alias: String,
+    talkgroup: u32,
+    system: String,
+}
+
+impl Title {
+    fn of(c: &CallInfo) -> Title {
+        Title { alias: c.talkgroup_tag.trim().to_string(), talkgroup: c.talkgroup, system: c.short_name.clone() }
+    }
+
+    /// `format` with `{alias}`, `{talkgroup}` and `{system}` filled in. A talkgroup with no alias
+    /// is "Talkgroup 101", whatever the format.
+    fn render(&self, format: &str) -> String {
+        if self.alias.is_empty() {
+            return format!("Talkgroup {}", self.talkgroup);
+        }
+        let t = format.replace("{alias}", &self.alias).replace("{talkgroup}", &self.talkgroup.to_string()).replace("{system}", &self.system);
+        let t = t.trim();
+        if t.is_empty() { self.alias.clone() } else { t.to_string() }
     }
 }
 
@@ -743,6 +786,25 @@ mod tests {
         m
     }
 
+    /// A feed's title: its format with the call's alias, talkgroup and system. A talkgroup with no
+    /// alias is "Talkgroup 101".
+    #[test]
+    fn titles_as_the_feed_says() {
+        let t = Title { alias: "Fire Dispatch".into(), talkgroup: 101, system: "county".into() };
+        assert_eq!(t.render(TITLE_FORMAT), "Fire Dispatch (101)");
+        assert_eq!(t.render("{alias}"), "Fire Dispatch");
+        assert_eq!(t.render("{system} - {alias}"), "county - Fire Dispatch");
+        assert_eq!(t.render("  "), "Fire Dispatch", "an empty format: the alias");
+        let none = Title { alias: String::new(), ..t };
+        assert_eq!(none.render("{alias}"), "Talkgroup 101");
+        assert_eq!(none.render(TITLE_FORMAT), "Talkgroup 101");
+        // Settings: the format, and the title when quiet, as saved; older settings get today's.
+        let f: FeedConfig = serde_json::from_value(json!({ "titleFormat": "{alias}", "idleTitle": "Scanning", "idleSeconds": 10 })).unwrap();
+        assert_eq!((f.title_format.as_str(), f.idle_title.as_str(), f.idle_seconds), ("{alias}", "Scanning", 10));
+        let old: FeedConfig = serde_json::from_value(json!({ "updateTitle": true })).unwrap();
+        assert_eq!((old.title_format.as_str(), old.idle_title.as_str(), old.idle_seconds), (TITLE_FORMAT, "", 5));
+    }
+
     #[test]
     fn the_settings_form() {
         let c = trunk_recorder_plugin::describe::<IcecastEndpoint>().config.unwrap();
@@ -768,6 +830,9 @@ mod tests {
                 "leftTalkgroups",
                 "rightTalkgroups",
                 "updateTitle",
+                "titleFormat",
+                "idleTitle",
+                "idleSeconds",
                 "streamName",
                 "description",
                 "genre",
@@ -870,6 +935,32 @@ mod tests {
             "ice-audio-info: channels=1;samplerate=16000;bitrate=24",
         ] {
             assert!(head.contains(&format!("{h}\r\n")), "{h}: {head}");
+        }
+    }
+
+    /// Each feed's title says what its Title format does: as before by default, the alias alone,
+    /// or with the system. (The plugin is driven directly, so the call plays while it runs.)
+    #[test]
+    fn a_feeds_title_follows_its_format() {
+        for (format, sent) in [(json!(null), "TG%20101%20%28101%29"), (json!("{alias}"), "TG%20101"), (json!("{system}: {alias}"), "sys1%3A%20TG%20101")] {
+            let server = fake::Server::ok();
+            let mut f = feed(server.port, json!({ "updateTitle": true, "idleSeconds": 0 }));
+            if !format.is_null() {
+                f["titleFormat"] = format.clone();
+            }
+            let dir = testing::temp_dir("icecast-endpoint");
+            let config: Config = serde_json::from_value(json!({ "feeds": [f] })).unwrap();
+            let setup =
+                Setup { config, systems: Vec::new(), host: Default::default(), capture_dir: dir.clone(), data_dir: dir, audio_formats: vec!["wav".into()] };
+            let (host, _) = testing::capture();
+            let mut p = IcecastEndpoint::start(host, setup).unwrap();
+            p.call_start(call(1, 101));
+            let chunk = AudioChunk { short_name: "sys1".into(), ..AudioChunk::new(1, 0, 101, 8000, &[1000; 8000]) };
+            p.audio(chunk);
+            let c = server.wait(|c| c.iter().any(|c| c.head.contains("&song=")));
+            p.shutdown(Duration::from_secs(2));
+            let song = c.iter().find_map(|c| c.head.split("&song=").nth(1)).map(|t| t.split(' ').next().unwrap_or_default().to_string());
+            assert_eq!(song.as_deref(), Some(sent), "{format}");
         }
     }
 
