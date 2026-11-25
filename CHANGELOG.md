@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.3]
+
+Built with trunk-recorder-plugin 0.16.1, for Trunk Recorder Pro v0.4.0 and later.
+
+### Fixed
+
+- **Back-to-back transmissions with conversation mode off.** Trunk Recorder Pro v0.5.1 ends each
+  transmission on its terminator and keeps its channel for the next, whose first audio then reaches
+  the plugin just before its start. The plugin routed such a call on that audio alone: its title was
+  "Talkgroup 101" whatever its alpha tag, and a feed that plays it only for a patched talkgroup left
+  it out. Its first audio now waits (half a second at most) for the start. Earlier versions could do
+  the same when one transmission followed another on a channel.
+
 ## [0.5.2]
 
 Built with trunk-recorder-plugin 0.14.0, for Trunk Recorder Pro v0.4.0 and later.

@@ -242,6 +242,18 @@ const FORGET_AFTER: Duration = Duration::from_secs(600);
 /// Another site's copy of a call started within this many seconds of it.
 const TWIN_WITHIN: f64 = 5.0;
 
+/// Audio of a call not told of yet waits this long for its start, or until there's this much of it.
+const EARLY_WAIT: Duration = Duration::from_millis(500);
+const EARLY_MOST_MS: usize = 3000;
+
+/// Audio that came before its call's start. The recorder sends a block's audio before its calls'
+/// starts, so a transmission on a channel it kept open (conversation mode off) begins this way.
+struct Early {
+    since: Instant,
+    chunks: Vec<AudioChunk>,
+    ms: usize,
+}
+
 /// Which feeds a call went to, kept until its files are written (`call.concluded`).
 struct Routed {
     short_name: String,
@@ -259,6 +271,8 @@ struct IcecastEndpoint {
     calls: HashMap<u32, CallInfo>,
     /// The calls routed, by id: the feeds playing each (maybe none), and when last heard.
     playing: HashMap<u32, (Vec<usize>, Instant)>,
+    /// Audio waiting for its call's start, by the id it came with.
+    early: HashMap<u32, Early>,
     /// The calls routed, until their files are written.
     routed: HashMap<u32, Routed>,
     health: Health,
@@ -348,20 +362,32 @@ impl Plugin for IcecastEndpoint {
             let feed = Feed::start(settings, health.clone()).map_err(|e| format!("{which}: {e}"))?;
             routes.push(Route { feed, system: f.system.clone(), filter, left, right, only: only.map(String::from), not: not.clone() });
         }
-        Ok(IcecastEndpoint { routes, calls: HashMap::new(), playing: HashMap::new(), routed: HashMap::new(), health })
+        Ok(IcecastEndpoint { routes, calls: HashMap::new(), playing: HashMap::new(), early: HashMap::new(), routed: HashMap::new(), health })
     }
 
     fn call_start(&mut self, call: CallInfo) {
+        self.release_early(false);
         self.forget_old();
         // A call not recorded here has no audio of its own; another site's copy may,
         // and is routed when its audio comes (as this call).
         if call.recording {
             self.route(call.id, &call.short_name, &talkgroups(&call), title(&call), skip(&call), call.start_time);
         }
-        self.calls.insert(call.id, call);
+        // Audio that came before it, perhaps as another site's copy: the call's.
+        let of = |id: u32, e: &Early| id == call.id || e.chunks.first().is_some_and(|c| c.short_name == call.short_name && c.talkgroup == call.talkgroup);
+        let mut early: Vec<u32> = self.early.iter().filter(|(id, e)| of(**id, e)).map(|(id, _)| *id).collect();
+        early.sort_unstable();
+        let id = call.id;
+        self.calls.insert(id, call);
+        for e in early {
+            for chunk in self.early.remove(&e).map(|e| e.chunks).unwrap_or_default() {
+                self.play(id, chunk);
+            }
+        }
     }
 
     fn audio(&mut self, chunk: AudioChunk) {
+        self.release_early(false);
         // A call heard on several sites plays from whichever copy has it: one that wasn't
         // told to start is the call that was (the same system and talkgroup).
         let id = if self.playing.contains_key(&chunk.call_id) || self.calls.contains_key(&chunk.call_id) {
@@ -369,25 +395,27 @@ impl Plugin for IcecastEndpoint {
         } else {
             self.calls.values().find(|c| c.short_name == chunk.short_name && c.talkgroup == chunk.talkgroup).map_or(chunk.call_id, |c| c.id)
         };
-        if !self.playing.contains_key(&id) {
-            let (tgs, t, s, start) = match self.calls.get(&id) {
-                Some(c) => (talkgroups(c), title(c), skip(c), c.start_time),
-                None => (vec![chunk.talkgroup], format!("Talkgroup {}", chunk.talkgroup), false, unix_now()),
-            };
-            self.route(id, &chunk.short_name, &tgs, t, s, start);
+        if self.playing.contains_key(&id) || self.calls.contains_key(&id) {
+            return self.play(id, chunk);
         }
-        let Some((routes, heard)) = self.playing.get_mut(&id) else { return };
-        *heard = Instant::now();
-        if routes.is_empty() {
-            return;
-        }
-        let samples = chunk.samples();
-        for &r in routes.iter() {
-            self.routes[r].feed.send(Msg::Audio { id, rate: chunk.sample_rate, samples: samples.clone() });
+        // Not told of yet: its start says what plays it (patched talkgroups, its title, encrypted).
+        let e = self.early.entry(id).or_insert_with(|| Early { since: Instant::now(), chunks: Vec::new(), ms: 0 });
+        e.ms += chunk.samples().len() * 1000 / chunk.sample_rate.max(1) as usize;
+        e.chunks.push(chunk);
+        if e.ms >= EARLY_MOST_MS {
+            self.release_early(false);
         }
     }
 
     fn call_end(&mut self, call: CallInfo) {
+        self.release_early(false);
+        // (Its start never came.)
+        if let Some(e) = self.early.remove(&call.id) {
+            self.calls.insert(call.id, call.clone());
+            for chunk in e.chunks {
+                self.play(call.id, chunk);
+            }
+        }
         self.calls.remove(&call.id);
         if let Some((routes, _)) = self.playing.remove(&call.id) {
             for r in routes {
@@ -419,6 +447,7 @@ impl Plugin for IcecastEndpoint {
 
     fn shutdown(&mut self, grace: Duration) {
         let deadline = Instant::now() + grace;
+        self.release_early(true);
         for r in &mut self.routes {
             r.feed.close();
         }
@@ -429,6 +458,37 @@ impl Plugin for IcecastEndpoint {
 }
 
 impl IcecastEndpoint {
+    /// A chunk of call `id`'s audio, to the feeds that play it.
+    fn play(&mut self, id: u32, chunk: AudioChunk) {
+        if !self.playing.contains_key(&id) {
+            let (tgs, t, s, start) = match self.calls.get(&id) {
+                Some(c) => (talkgroups(c), title(c), skip(c), c.start_time),
+                None => (vec![chunk.talkgroup], format!("Talkgroup {}", chunk.talkgroup), false, unix_now()),
+            };
+            self.route(id, &chunk.short_name, &tgs, t, s, start);
+        }
+        let Some((routes, heard)) = self.playing.get_mut(&id) else { return };
+        *heard = Instant::now();
+        if routes.is_empty() {
+            return;
+        }
+        let samples = chunk.samples();
+        for &r in routes.iter() {
+            self.routes[r].feed.send(Msg::Audio { id, rate: chunk.sample_rate, samples: samples.clone() });
+        }
+    }
+
+    /// Audio whose call's start hasn't come in good time (or `all` of it) plays without it.
+    fn release_early(&mut self, all: bool) {
+        let mut due: Vec<u32> = self.early.iter().filter(|(_, e)| all || e.ms >= EARLY_MOST_MS || e.since.elapsed() >= EARLY_WAIT).map(|(id, _)| *id).collect();
+        due.sort_unstable();
+        for id in due {
+            for chunk in self.early.remove(&id).map(|e| e.chunks).unwrap_or_default() {
+                self.play(id, chunk);
+            }
+        }
+    }
+
     /// Start a call on the feeds that play it, and remember which.
     fn route(&mut self, id: u32, short_name: &str, talkgroups: &[u32], title: String, skip: bool, start: f64) {
         if self.playing.contains_key(&id) {
@@ -1028,6 +1088,120 @@ mod tests {
         // Not ended, so not counted as played, but its audio went and the other's didn't.
         assert_eq!(out.metrics().last().unwrap().extra["callsDropped"], 0);
         assert!(out.ready());
+    }
+
+    /// The transmission after another on a channel the recorder kept (conversation mode off, Trunk
+    /// Recorder Pro v0.5.1): its first audio comes just before its start.
+    fn audio_first(c: CallInfo) -> Vec<HostMessage> {
+        let mut m = audio(c.id, c.talkgroup);
+        let rest = m.split_off(2);
+        m.push(HostMessage::CallStart(c.clone()));
+        m.extend(rest);
+        m.push(HostMessage::CallEnd(c));
+        m
+    }
+
+    /// It plays on the feeds its start says, not the ones its audio alone would.
+    #[test]
+    fn audio_before_its_start_waits_for_it() {
+        let server = fake::Server::ok();
+        let (mut a, mut b) = (call(1, 101), call(2, 101));
+        for c in [&mut a, &mut b] {
+            c.patched_talkgroups = vec![101, 202];
+        }
+        let mut m = vec![hello(json!([feed(server.port, json!({ "talkgroups": ["202"] }))]))];
+        m.extend(whole(a));
+        m.extend(audio_first(b.clone()));
+        m.push(concluded(&b, 2));
+        let out = run(m);
+        assert_eq!(played(&out), 2);
+        assert_eq!(results(&out), [("sys1/2".into(), Outcome::Ok)]);
+    }
+
+    /// An encrypted call's is left out, and counted so.
+    #[test]
+    fn audio_before_an_encrypted_calls_start_is_left_out() {
+        let server = fake::Server::ok();
+        let mut c = call(1, 101);
+        c.encrypted = true;
+        let mut m = vec![hello(json!([feed(server.port, json!({}))]))];
+        m.extend(audio_first(c.clone()));
+        m.push(concluded(&c, 1));
+        let out = run(m);
+        assert_eq!(played(&out), 0);
+        assert_eq!(results(&out), [("sys1/1".into(), Outcome::Skipped)]);
+        assert!(out.results()[0].2.contains("encrypted"), "{:?}", out.results());
+    }
+
+    /// Audio of another site's copy, before the call's start: the call's.
+    #[test]
+    fn a_copys_audio_before_its_calls_start_is_the_calls() {
+        let server = fake::Server::ok();
+        let mut first = call(1, 101);
+        first.recording = false;
+        let mut m = vec![hello(json!([feed(server.port, json!({}))]))];
+        m.extend(audio(9, 101));
+        m.push(HostMessage::CallStart(first.clone()));
+        m.push(HostMessage::CallEnd(first));
+        assert_eq!(played(&run(m)), 1);
+    }
+
+    /// The plugin itself, with one feed, driven directly (so its calls play while it runs).
+    fn plugin(server: &fake::Server, extra: Value) -> IcecastEndpoint {
+        let dir = testing::temp_dir("icecast-endpoint");
+        let config: Config = serde_json::from_value(json!({ "feeds": [feed(server.port, extra)] })).unwrap();
+        let setup = Setup { config, systems: Vec::new(), host: Default::default(), capture_dir: dir.clone(), data_dir: dir, audio_formats: vec!["wav".into()] };
+        IcecastEndpoint::start(testing::capture().0, setup).unwrap()
+    }
+
+    fn chunk(id: u32, tg: u32, ms: usize) -> AudioChunk {
+        AudioChunk { short_name: "sys1".into(), ..AudioChunk::new(id, 0, tg, 8000, &vec![1000; ms * 8]) }
+    }
+
+    /// The first title sent, as the server got it.
+    fn first_title(server: &fake::Server) -> Option<String> {
+        let c = server.wait(|c| c.iter().any(|c| c.head.contains("&song=")));
+        c.iter().find_map(|c| c.head.split("&song=").nth(1)).map(|t| t.split(' ').next().unwrap_or_default().to_string())
+    }
+
+    /// Its title is the one its start gives.
+    #[test]
+    fn audio_before_its_start_has_its_title() {
+        let server = fake::Server::ok();
+        let mut p = plugin(&server, json!({ "updateTitle": true }));
+        p.audio(chunk(1, 101, 180));
+        p.call_start(call(1, 101));
+        p.audio(chunk(1, 101, 800));
+        let title = first_title(&server);
+        p.shutdown(Duration::from_secs(2));
+        assert_eq!(title.as_deref(), Some("TG%20101%20%28101%29"));
+    }
+
+    /// No start comes (the recorder dropped it): the call plays anyway, by its talkgroup.
+    #[test]
+    fn audio_whose_start_never_comes_plays() {
+        let server = fake::Server::ok();
+        let mut p = plugin(&server, json!({ "updateTitle": true }));
+        // Enough of it at once, or (the next test) a while with no start.
+        for _ in 0..20 {
+            p.audio(chunk(1, 101, 200));
+        }
+        let title = first_title(&server);
+        p.shutdown(Duration::from_secs(2));
+        assert_eq!(title.as_deref(), Some("Talkgroup%20101"));
+    }
+
+    #[test]
+    fn audio_whose_start_is_late_plays() {
+        let server = fake::Server::ok();
+        let mut p = plugin(&server, json!({ "updateTitle": true }));
+        p.audio(chunk(1, 101, 200));
+        std::thread::sleep(Duration::from_millis(600));
+        // Anything the recorder sends is a chance to see it's waited long enough.
+        p.call_end(call(5, 505));
+        let title = first_title(&server);
+        p.shutdown(Duration::from_secs(2));
+        assert_eq!(title.as_deref(), Some("Talkgroup%20101"));
     }
 
     #[test]

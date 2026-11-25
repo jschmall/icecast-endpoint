@@ -640,7 +640,7 @@ SOFTWARE.
 
 Used by:
 
-- [icecast-endpoint 0.5.2](https://github.com/jschmall/icecast-endpoint)
+- [icecast-endpoint 0.5.3](https://github.com/jschmall/icecast-endpoint)
 
 ```
 MIT License
@@ -671,7 +671,7 @@ SOFTWARE.
 
 Used by:
 
-- [trunk-recorder-plugin 0.14.0](https://github.com/TrunkRecorder/trunk-recorder-pro)
+- [trunk-recorder-plugin 0.16.1](https://github.com/TrunkRecorder/trunk-recorder-pro)
 
 ```
 MIT License
