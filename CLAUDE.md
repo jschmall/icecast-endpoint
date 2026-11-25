@@ -19,18 +19,20 @@ should also work as an endpoint.
   Return quickly. Hand network, encoding, and subprocess work to our own threads.
 - The SDK is the `trunk-recorder-plugin` crate. API reference: https://docs.rs/trunk-recorder-plugin
 - Settings are a config struct deriving JsonSchema. The recorder draws a settings form from it.
-  Only a subset of JSON Schema is supported; see the template's settings.md (below).
+  Only a subset of JSON Schema is supported; see Settings in writing-plugins.md (below).
 
 ## Source of truth
 
 Read the relevant doc before writing code. Do not guess event names, field names, or protocol details.
 
-The template's guide was removed from this repo before the first release. Read it upstream at
-https://github.com/TrunkRecorder/trunk-plugin-template/tree/main/docs:
+The guide is in the app's repo, https://github.com/TrunkRecorder/trunk-recorder-pro (read it at the release
+you build for, e.g. `v0.5.1`, rather than `main`). The template's own docs/ are older copies: don't use them.
 
-- getting-started.md, how-plugins-work.md (lifecycle, threads, failures), events.md (every subscribable
-  event, including live audio), settings.md, audio.md (audio formats, fallbacks), uploading.md,
-  testing.md, releasing.md, protocol.md, registry.md
+- docs/plugins/writing-plugins.md: how a plugin runs (manifest, threads, failures), settings, audio (formats),
+  testing, releasing, publishing to the registry
+- docs/developer/plugins/events.md: every subscribable event, including live audio, and their order and loss
+- docs/developer/plugins/protocol.md: the wire protocol, settings schemas
+- docs/developer/plugins/uploading.md: uploaders (`CallQueue`)
 - Closest reference plugin: https://github.com/TrunkRecorder/trunk-plugin-simplestream (live audio streaming)
 - Other references: trunk-plugin-broadcastify (Calls API, not what we are building), trunk-plugin-openmhz,
   trunk-plugin-rdioscanner, trunk-plugin-upload-script (all under github.com/TrunkRecorder)
@@ -39,7 +41,7 @@ https://github.com/TrunkRecorder/trunk-plugin-template/tree/main/docs:
 
 Resolve these from the docs and the Icecast and Broadcastify specs before implementing. Do not assume.
 
-- Input: use the live audio event (see events.md and audio.md). Confirm sample rate, channel
+- Input: use the live audio event (see events.md, and Audio in writing-plugins.md). Confirm sample rate, channel
   count, and sample format, and what happens between calls (no audio is delivered when idle).
 - Icecast source protocol: confirm which handshake to support (HTTP PUT as in Icecast 2.4+, and/or the
   legacy SOURCE method), authentication (username and password), mount point, and required headers
@@ -94,7 +96,7 @@ run a local Icecast server and point the plugin at it.
 
 ### Registry submission
 
-The plugin store lists releases from the registry, github.com/TrunkRecorder/plugins (see the template's registry.md).
+The plugin store lists releases from the registry, github.com/TrunkRecorder/plugins (see Publishing to the registry in writing-plugins.md).
 A release gets there by a pull request from the user's fork of it. `scripts/registry-pr.sh` checks every step;
 machine-specific details (where the registry clone is) are in CLAUDE.local.md.
 
