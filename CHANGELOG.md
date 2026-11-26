@@ -10,8 +10,8 @@ Built with trunk-recorder-plugin 0.16.1, for Trunk Recorder Pro v0.4.0 and later
 - **Fill in from Broadcastify.** Type your Broadcastify username and password and press **Fill in
   from Broadcastify**: the plugin logs in to Broadcastify (`api.broadcastify.com`, as the
   Broadcastify appliance does) and adds your feed with its server, port, mount and source password,
-  or fills in the one already streaming to that mount. The password isn't kept: it's cleared once
-  the feed is saved. With several feeds on the account, it lists them to choose from (**Broadcastify
+  or fills in the one already streaming to that mount (on whichever Broadcastify server it was).
+  The password isn't kept: it's cleared once the feed is saved. With several feeds on the account, it lists them to choose from (**Broadcastify
   feed ID**). It also checks that the computer can connect to the feed's server.
 - **It says when the network is in the way.** A city, county, school or company network often blocks
   the login or the stream. Rather than failing, the button says what it ran into: a name the
@@ -24,7 +24,7 @@ Built with trunk-recorder-plugin 0.16.1, for Trunk Recorder Pro v0.4.0 and later
 ### Changed
 
 - **The plugin starts with no feeds** (it said "Add a feed" and stopped), so a feed can be filled in
-  from Broadcastify. It says there are none yet.
+  from Broadcastify. It says there are none yet, in the log and on the plugin's card.
 - **New settings restart the feeds, not the plugin** (`live_settings`): the plugin saves the feed it
   fills in itself, which only a plugin taking settings as it runs may do. Feeds reconnect, as they
   did when the plugin restarted; settings with a mistake leave the feeds as they were.

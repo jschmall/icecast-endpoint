@@ -216,7 +216,11 @@ pub fn fill_in(feeds: &Value, f: &BcfyFeed) -> (Vec<Value>, bool) {
     let mount = f.mount();
     let same = |v: &Value| {
         let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").trim().to_string();
-        s("server").eq_ignore_ascii_case(&f.host) && format!("/{}", s("mount").trim_start_matches('/')) == mount
+        let server = s("server");
+        // Broadcastify moves feeds between its servers (audio9, audio3, …): on its servers the
+        // mount is the feed.
+        let same_server = server.eq_ignore_ascii_case(&f.host) || (on_broadcastify(&server) && on_broadcastify(&f.host));
+        same_server && format!("/{}", s("mount").trim_start_matches('/')) == mount
     };
     match feeds.iter_mut().find(|v| same(v)) {
         Some(v) => {
@@ -233,6 +237,11 @@ pub fn fill_in(feeds: &Value, f: &BcfyFeed) -> (Vec<Value>, bool) {
             (feeds, true)
         }
     }
+}
+
+/// One of Broadcastify's own servers.
+fn on_broadcastify(host: &str) -> bool {
+    host.trim().to_ascii_lowercase().ends_with(".broadcastify.com")
 }
 
 /// The host a URL names.
@@ -376,5 +385,13 @@ mod tests {
             (&json!("Mine"), &json!(80), &json!("s3cret"), &json!(true))
         );
         assert_eq!(fill_in(&Value::Null, f).0.len(), 1, "no feeds yet");
+        // Moved to another Broadcastify server: the same feed (its mount), not a second one.
+        let moved = json!([{ "name": "Mine", "server": "audio3.broadcastify.com", "port": 80, "mount": "/abcd1234", "password": "old" }]);
+        let (feeds, added) = fill_in(&moved, f);
+        assert!(!added);
+        assert_eq!((feeds.len(), &feeds[0]["server"], &feeds[0]["name"]), (1, &json!("audio9.broadcastify.com"), &json!("Mine")));
+        // The same mount on a server that isn't Broadcastify's is another feed.
+        let other = json!([{ "name": "Mine", "server": "icecast.example", "port": 8000, "mount": "/abcd1234", "password": "p" }]);
+        assert!(fill_in(&other, f).1);
     }
 }

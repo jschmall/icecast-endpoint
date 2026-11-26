@@ -20,7 +20,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use trunk_recorder_plugin::filter::{TalkgroupMode, patterns, talkgroup_list};
-use trunk_recorder_plugin::{Action, AudioChunk, CallInfo, ConcludedCall, Host, Manifest, Plugin, Reply, Setup, TalkgroupFilter, Talkgroups, topic};
+use trunk_recorder_plugin::{Action, AudioChunk, CallInfo, ConcludedCall, Host, Manifest, Plugin, Reply, Setup, State, TalkgroupFilter, Talkgroups, topic};
 
 use encode::Mp3;
 use feed::{Feed, Health, Msg, Pan};
@@ -53,7 +53,9 @@ struct Config {
     /// With more than one feed on the account: the one to fill in (its number, as in broadcastify.com/listen/feed/38565).
     #[serde(rename = "broadcastifyFeedId")]
     broadcastify_feed_id: Option<u32>,
-    /// Where an account's feeds come from: Broadcastify's, unless testing against another server.
+    /// Where an account's feeds come from in tests (a mock server). Not in release builds: the
+    /// login only ever goes to Broadcastify.
+    #[cfg(test)]
     #[serde(rename = "broadcastifyApi", skip_serializing_if = "String::is_empty")]
     #[schemars(skip)]
     broadcastify_api: String,
@@ -356,11 +358,9 @@ impl Plugin for IcecastEndpoint {
 
     fn start(host: Host, setup: Setup<Config, Self::SystemConfig>) -> Result<Self, String> {
         let planned = plan(&host, &setup)?;
-        if planned.is_empty() {
-            host.warn("No feeds yet: add one, or fill one in from your Broadcastify account (Fill in from Broadcastify).");
-        }
         let health = Health::new(host.clone());
         let routes = launch(planned, &health)?;
+        say_if_no_feeds(&host, &routes);
         let api = api_of(&setup.config);
         Ok(IcecastEndpoint {
             routes,
@@ -396,6 +396,7 @@ impl Plugin for IcecastEndpoint {
         }
         self.health.forget_feeds();
         self.routes = launch(planned, &self.health)?;
+        say_if_no_feeds(&self.host, &self.routes);
         Ok(())
     }
 
@@ -623,9 +624,22 @@ fn launch(planned: Vec<Planned>, health: &Health) -> Result<Vec<Route>, String> 
     Ok(routes)
 }
 
+/// No feeds: said in the log and on the plugin's card (its health), with what to do.
+fn say_if_no_feeds(host: &Host, routes: &[Route]) {
+    if routes.is_empty() {
+        let what = "No feeds yet: add one, or fill one in from your Broadcastify account (Fill in from Broadcastify).";
+        host.warn(what);
+        host.status(State::Warning, what);
+    }
+}
+
 /// Where a Broadcastify account's feeds come from.
-fn api_of(c: &Config) -> String {
-    if c.broadcastify_api.trim().is_empty() { broadcastify::API.to_string() } else { c.broadcastify_api.trim().to_string() }
+fn api_of(_c: &Config) -> String {
+    #[cfg(test)]
+    if !_c.broadcastify_api.trim().is_empty() {
+        return _c.broadcastify_api.trim().to_string();
+    }
+    broadcastify::API.to_string()
 }
 
 /// Fill in from Broadcastify (`value`: the settings as edited): log in, choose the feed, and fill
@@ -1168,6 +1182,10 @@ mod tests {
         let out = run(vec![hello(json!([]))]);
         assert!(out.ready(), "{:?}", out.messages);
         assert!(out.logs().iter().any(|l| l.1.contains("No feeds yet") && l.1.contains("Fill in from Broadcastify")), "{:?}", out.logs());
+        // And on the plugin's card.
+        let (state, message) = out.status().expect("a status");
+        assert_eq!(state, State::Warning);
+        assert!(message.contains("No feeds yet"), "{message}");
     }
 
     #[test]
