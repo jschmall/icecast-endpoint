@@ -11,8 +11,10 @@ Built with trunk-recorder-plugin 0.16.1, for Trunk Recorder Pro v0.4.0 and later
   from Broadcastify**: the plugin logs in to Broadcastify (`api.broadcastify.com`, as the
   Broadcastify appliance does) and adds your feed with its server, port, mount and source password,
   or fills in the one already streaming to that mount (on whichever Broadcastify server it was).
-  The password isn't kept: it's cleared once the feed is saved. With several feeds on the account, it lists them to choose from (**Broadcastify
-  feed ID**). It also checks that the computer can connect to the feed's server.
+  The password isn't kept: it's cleared once the feed is saved. With several feeds on the account,
+  it lists them under **Your Broadcastify feeds**, a row each with **Fill in this feed** (or choose
+  one with **Broadcastify feed ID**). It also checks that the computer can connect to the feed's
+  server.
 - **It says when the network is in the way.** A city, county, school or company network often blocks
   the login or the stream. Rather than failing, the button says what it ran into: a name the
   network's DNS won't look up, a firewall dropping or refusing the connection, HTTPS intercepted by
@@ -27,7 +29,9 @@ Built with trunk-recorder-plugin 0.16.1, for Trunk Recorder Pro v0.4.0 and later
   from Broadcastify. It says there are none yet, in the log and on the plugin's card.
 - **New settings restart the feeds, not the plugin** (`live_settings`): the plugin saves the feed it
   fills in itself, which only a plugin taking settings as it runs may do. Feeds reconnect, as they
-  did when the plugin restarted; settings with a mistake leave the feeds as they were.
+  did when the plugin restarted, but only when the feeds changed: typing the Broadcastify login
+  leaves them streaming. Settings with a mistake leave the feeds as they were.
+- The log lists a feed's talkgroups once each when "Only some" and the sides name the same ones.
 - Dependencies: ureq 3 (HTTPS, rustls), for the Broadcastify login. THIRD-PARTY-LICENSES.md adds
   its licenses (ISC, BSD-3-Clause, CDLA-Permissive-2.0 for Mozilla's root certificates).
 

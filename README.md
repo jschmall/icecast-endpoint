@@ -165,9 +165,15 @@ The plugin can fill in a feed's **Server**, **Port**, **Mount** and
 
 It adds the feed, or fills in the one already streaming to that mount, and
 clears the password: it isn't kept. With more than one feed on the account it
-lists them; put the one you want under **Broadcastify feed ID** (the number in
-its address, broadcastify.com/listen/feed/38565) and press again. Then choose
-its **System** and **Talkgroups**: until you do, it plays every call.
+lists them under **Your Broadcastify feeds**, a row each (its name, feed ID,
+server and mount): open the one you want and press **Fill in this feed**. Or put
+its number under **Broadcastify feed ID** (as in its address,
+broadcastify.com/listen/feed/38565) and press **Fill in from Broadcastify**
+again. Then choose its **System** and **Talkgroups**: until you do, it plays
+every call.
+
+Typing the username and password doesn't interrupt the stream: only a change to
+the feeds restarts them.
 
 It also checks that this computer can connect to the feed's server, and says so
 if it can't.
