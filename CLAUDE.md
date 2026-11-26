@@ -118,6 +118,16 @@ deletes branches the canonical repo doesn't have. GitHub then closes the PR on i
 user, because the mirror's token is theirs. If a registry PR closes itself, push its branch to `origin`, run
 `verify` (it tells you to reopen the closed PR), and have the user press **Reopen pull request**.
 
+## Contributing upstream (Trunk Recorder Pro)
+
+- Suggestions and fixes for the Trunk Recorder Pro app (its SDK, docs or protocol included) go upstream as pull
+  requests, not issues: its maintainer prefers a PR whenever there's a change to propose.
+- Prepare one on a `pr/<topic>` branch from `upstream/main` in the fork clone at `~/projects/trunk-recorder-pro`,
+  push it to that clone's Forgejo `origin`, and let the mirror carry it to the GitHub fork. The user opens the PR on
+  GitHub. As with the registry, never push the branch straight to the GitHub fork.
+- Never open issues, PRs or comments upstream from this machine.
+- This plugin doesn't build against that clone: it uses the published `trunk-recorder-plugin` crate.
+
 ## Working agreement
 
 - Before implementing a feature, state which docs and events it depends on.
