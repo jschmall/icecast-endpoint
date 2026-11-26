@@ -247,7 +247,9 @@ fn run(s: Settings, rx: Receiver<Msg>, health: &Health, stop: &AtomicBool) {
                 quiet_since = None;
             } else {
                 let since = *quiet_since.get_or_insert(tick);
+                // Only once a call has named the stream: a feed just started has no title to take back.
                 if let Some((after, quiet)) = &idle
+                    && want.is_some()
                     && tick.duration_since(since) >= *after
                 {
                     // Cleared with a space: Icecast 2.5 ignores an empty title (2.4 clears on either).
@@ -671,6 +673,19 @@ mod tests {
             assert!(after(&c), "{quiet:?}: {:?}", titles_sent(&c));
             assert_eq!(titles_sent(&c).last().map(String::as_str), Some("EMS"), "the next call names itself");
         }
+    }
+
+    /// A feed that hasn't played a call yet sends no quiet title: it has no title to take back.
+    #[test]
+    fn no_quiet_title_before_a_call() {
+        let server = fake::Server::ok();
+        let (host, _) = testing::capture();
+        let s = Settings { update_title: true, idle: Some((Duration::from_millis(100), "Scanning".into())), ..settings(server.port) };
+        let feed = Feed::start(s, Health::new(host)).unwrap();
+        server.wait(|c| !c.is_empty());
+        std::thread::sleep(Duration::from_millis(600));
+        feed.finish(soon());
+        assert!(titles_sent(&server.conns()).is_empty(), "{:?}", titles_sent(&server.conns()));
     }
 
     /// With no quiet time, the last call's title stays.

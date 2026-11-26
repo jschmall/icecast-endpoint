@@ -16,6 +16,12 @@ Built with trunk-recorder-plugin 0.16.1, for Trunk Recorder Pro v0.4.0 and later
   `{alias} ({talkgroup})`, is as before ("Fire Dispatch (101)"); `{alias}` alone leaves off the
   talkgroup number. A talkgroup with no alpha tag is still "Talkgroup 101".
 
+### Changed
+
+- **Feeds with titles on now clear the title after 5 s of quiet** (the new default). Set **Quiet
+  after (seconds)** to 0 to keep the last call's title, as before. A feed that hasn't played a call
+  yet sends no title.
+
 ## [0.5.3]
 
 Built with trunk-recorder-plugin 0.16.1, for Trunk Recorder Pro v0.4.0 and later.
