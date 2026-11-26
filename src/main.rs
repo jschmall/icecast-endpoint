@@ -160,7 +160,7 @@ struct FeedConfig {
     protocol: Protocol,
     /// Bitrate (kbps)
     ///
-    /// Broadcastify recommends 16 kbps (32 in stereo). Other MP3 bitrates: 8, 24, 32, 40, 48, 64, 80, 96, 112, 128.
+    /// Broadcastify recommends 16 kbps (32 in stereo). Other MP3 bitrates: 8, 24, 32, 40, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320 (at most 160 below 32000 Hz, at least 32 from 32000 Hz up).
     #[schemars(range(min = 8, max = 320))]
     bitrate: u32,
     /// Sample rate (Hz)
