@@ -16,29 +16,47 @@ talkgroups panned left and right so two calls can be heard at once.
 ## What you need
 
 - Trunk Recorder Pro v0.4.0 or later.
-- An Icecast mount to stream to: its server, port, mount and source password.
-  For a Broadcastify feed, these are on your feed's **Technical** tab.
+- Somewhere to stream to, either:
+  - a Broadcastify feed: your Broadcastify username and password are enough,
+    or copy the feed's server, port, mount and source password from its
+    **Technical** tab; or
+  - any Icecast mount: its server, port, mount and source password.
 
 Nothing else to install. The MP3 encoder is built in.
 
 ## Getting started
 
-1. **Install the plugin.** Download the build for your computer from the
-   [releases page](https://github.com/jschmall/icecast-endpoint/releases) and
-   unpack it. In the recorder, open the **Plugins** page, press **Add from a
-   file**, and choose the `icecast-endpoint` program you unpacked.
-2. **Set it up.** Press **Set up** on the plugin's card, then **Add feed**.
-   Fill in **Server**, **Port**, **Mount** and **Password**. For a
-   Broadcastify feed, copy each one from your feed's Technical tab, or load
-   your feeds from your Broadcastify account (see
-   [Using a feed from your Broadcastify account](#using-a-feed-from-your-broadcastify-account)).
-3. **Choose what it plays** (optional). Pick a **System**, and under
+1. **Install the plugin.** In the recorder, open **Plugins**, choose the
+   **Install & settings** tab, find **Icecast Endpoint** under **Find
+   plugins**, and press **Install**. It's installed off, and the recorder takes
+   you to its card in **Setup**, on the **Plugins** tab. From a terminal:
+   `trunk-pro plugin install icecast-endpoint`.
+   (Or download the build for your computer from the
+   [releases page](https://github.com/jschmall/icecast-endpoint/releases),
+   unpack it, press **Add from a file…** on the Plugins page and choose the
+   `icecast-endpoint` program. The store doesn't update a copy added this way.)
+2. **Turn it on**, and start recording. With no feeds yet, its card says
+   **No feeds yet**; that's expected.
+3. **Add a feed.**
+   - **Broadcastify:** type your **Broadcastify username** and **Broadcastify
+     password** at the bottom of its settings, press **Load my Broadcastify
+     feeds**, open the feed to stream to under **Your Broadcastify feeds**,
+     and press **Use this feed** (see
+     [Using a feed from your Broadcastify account](#using-a-feed-from-your-broadcastify-account)).
+   - **By hand** (any Icecast server, or a Broadcastify feed's Technical tab):
+     under **Feeds**, add a feed and fill in **Server**, **Port**, **Mount**
+     and **Password**.
+4. **Choose what it plays** (optional). Pick a **System**, and under
    **Talkgroups** choose **Every talkgroup**, **Only some** or **All but
    some** (see [Choosing talkgroups](#choosing-talkgroups)). Left as it is,
    the feed plays every call. To hear talkgroups side by side, list some under
    **Talkgroups on the left** and **Talkgroups on the right** (see
    [Stereo](#stereo)).
-4. **Turn it on**, and start recording.
+
+Settings take effect as you save them, without restarting the plugin: a
+change to the feeds reconnects them, and other changes (such as typing the
+Broadcastify login) leave them streaming. Settings with a mistake leave the
+feeds as they were, and the card says what's wrong.
 
 The plugin's card shows **streaming to** your feed once it's connected. To
 hear it, open your feed's page on Broadcastify, or
@@ -58,7 +76,7 @@ filled in.
 | Username | Leave it as `source` unless your server says otherwise. |
 | Password | The mount's source password. |
 | Protocol | **Automatic** works with any Icecast server. Choose PUT or SOURCE only if your server needs one of them. |
-| Bitrate (kbps) | Default: 16, what Broadcastify recommends for a mono feed (32 for stereo). Other choices: 8, 24, 32, 40, 48, 64, 80, 96, 112 and 128. |
+| Bitrate (kbps) | Default: 16, what Broadcastify recommends for a mono feed (32 for stereo). Other choices: 8, 24, 32, 40, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256 and 320. Below 32000 Hz the most is 160; at 32000 Hz and up the least is 32. Otherwise the settings aren't taken, and the recorder says why. |
 | Sample rate (Hz) | Default: 22050, what Broadcastify recommends. Other choices: 16000, 24000, 32000, 44100 and 48000. |
 | Volume | How loud the calls play: 1 is as recorded, 2 twice as loud, 0.5 half as loud, from 0.1 to 10. If your recorder's audio is quiet, try 2 or 3. Loud parts are clipped, so raise it only as far as you need. Default: 1. |
 | System | The system whose calls the feed plays. Empty: every system. |
@@ -70,7 +88,7 @@ filled in.
 | Title | What the title says: `{alias}` (the talkgroup's alpha tag), `{talkgroup}` (its number) and `{system}`. Default: `{alias} ({talkgroup})`, "Fire Dispatch (101)". `{alias}` alone leaves off the number; `{system} - {alias}` names the system too. A talkgroup with no alpha tag shows as "Talkgroup 101". |
 | Title when quiet | The title once nothing has played for **Quiet after** seconds, so listeners don't see the last call's talkgroup during a quiet stretch. Empty (the default) clears the title; or say what the feed is, such as "Scanning". |
 | Quiet after (seconds) | How long after the last call the title changes to **Title when quiet**. Default: 5. 0 keeps the last call's title until the next call. |
-| Stream name, Description, Genre, Website | What listeners see about the stream. Stream name defaults to the feed's Name. |
+| Stream name, Description, Genre, Website | What listeners see about the stream. Stream name defaults to the feed's Name, and Genre to `Scanner`. |
 | List publicly | Asks the server to list the stream in its public directory. Leave it off for Broadcastify. |
 | Longest delay (seconds) | Calls that happen at the same time play one after another (on a stereo feed, each side on its own). When more than this much audio is waiting, the oldest waiting call is dropped. Default: 60. For a feed meant to sound live, 10 to 15 keeps it close to real time. |
 
@@ -93,10 +111,11 @@ takes:
 
 Separate them with spaces, commas or semicolons. The settings form checks each
 entry as you type it. If a list has something that isn't a talkgroup, the
-plugin won't start, and its card says which feed and which entry, such as
-`Feed County: talkgroups: "10OO" isn't a talkgroup`.
+settings aren't taken: the feeds keep playing as they were (or, when the
+plugin starts with them, it won't start), and the recorder says which feed and
+which entry, such as `Feed County: talkgroups: "10OO" isn't a talkgroup`.
 
-**Only some** with nothing listed (here or on a side) won't start either:
+**Only some** with nothing listed (here or on a side) isn't taken either:
 list the talkgroups, or choose **Every talkgroup**.
 
 #### Feeds set up with version 0.4.0 or earlier
@@ -226,7 +245,13 @@ The plugin's card, and the recorder's log, say what's wrong:
 | wrong username or password | Check the Password (and Username) against your feed's Technical tab. |
 | the server refused the mount (in use by another source…) | Something else is already streaming to that mount, such as an old scanner setup. Stop it, or use another mount. |
 | there's no such mount | Check the Mount. |
+| can't find … | The Server's name couldn't be looked up. Check its spelling, and your internet connection. |
 | can't connect to … | Check the Server and Port, and your internet connection. The plugin keeps retrying on its own. |
+| No feeds yet | Add a feed, or load one from your Broadcastify account (see [Getting started](#getting-started)). |
+
+For what **Load my Broadcastify feeds** and **Use this feed** can say, such as
+a username and password Broadcastify didn't accept or a network in the way, see
+[On a city, county, school or company network](#on-a-city-county-school-or-company-network).
 
 If the connection drops, the plugin reconnects by itself, waiting a little
 longer after each try, up to a minute.
