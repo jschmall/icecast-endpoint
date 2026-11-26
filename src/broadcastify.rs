@@ -192,21 +192,12 @@ pub fn reachable(host: &str, port: u16) -> Result<(), String> {
     Err(blocked(last))
 }
 
-/// The feed to fill in: the one asked for, or the account's only one. Err: what to say (which
-/// feeds there are, to choose from).
-pub fn pick(feeds: &[BcfyFeed], id: Option<u32>) -> Result<&BcfyFeed, String> {
-    let list = || feeds.iter().map(|f| format!("{} ({})", f.id, f.name.trim())).collect::<Vec<_>>().join(", ");
-    match id {
-        Some(id) => feeds.iter().find(|f| f.id == id).ok_or_else(|| format!("This account has no feed {id}. Its feeds: {}.", list())),
-        None => match feeds {
-            [f] => Ok(f),
-            _ => Err(format!(
-                "This account has {} feeds: {}. Put the one to fill in under Broadcastify feed ID, then press the button again.",
-                feeds.len(),
-                list()
-            )),
-        },
-    }
+/// The account's feed `id`. Err: what to say (which feeds there are).
+pub fn pick(feeds: &[BcfyFeed], id: u32) -> Result<&BcfyFeed, String> {
+    feeds.iter().find(|f| f.id == id).ok_or_else(|| {
+        let list = feeds.iter().map(|f| format!("{} ({})", f.id, f.name.trim())).collect::<Vec<_>>().join(", ");
+        format!("This account has no feed {id}. Its feeds: {list}.")
+    })
 }
 
 /// The plugin's feeds (as edited) with `f` filled in: the feed already streaming to its mount
@@ -360,11 +351,9 @@ mod tests {
     #[test]
     fn which_feed() {
         let feeds = answer("x", 200, FEEDS).unwrap();
-        assert_eq!(pick(&feeds, Some(40001)).unwrap().id, 40001);
-        let m = pick(&feeds, None).unwrap_err();
-        assert!(m.contains("2 feeds: 38565 (Augusta Fire), 40001 (Augusta Police)") && m.contains("Broadcastify feed ID"), "{m}");
-        assert!(pick(&feeds, Some(1)).unwrap_err().contains("no feed 1"));
-        assert_eq!(pick(&feeds[..1], None).unwrap().id, 38565, "the only one");
+        assert_eq!(pick(&feeds, 40001).unwrap().id, 40001);
+        let m = pick(&feeds, 1).unwrap_err();
+        assert!(m.contains("no feed 1") && m.contains("38565 (Augusta Fire), 40001 (Augusta Police)"), "{m}");
     }
 
     #[test]

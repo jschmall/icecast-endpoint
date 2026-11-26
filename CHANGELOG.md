@@ -7,14 +7,13 @@ Built with trunk-recorder-plugin 0.16.1, for Trunk Recorder Pro v0.4.0 and later
 
 ### Added
 
-- **Fill in from Broadcastify.** Type your Broadcastify username and password and press **Fill in
-  from Broadcastify**: the plugin logs in to Broadcastify (`api.broadcastify.com`, as the
-  Broadcastify appliance does) and adds your feed with its server, port, mount and source password,
-  or fills in the one already streaming to that mount (on whichever Broadcastify server it was).
-  The password isn't kept: it's cleared once the feed is saved. With several feeds on the account,
-  it lists them under **Your Broadcastify feeds**, a row each with **Fill in this feed** (or choose
-  one with **Broadcastify feed ID**). It also checks that the computer can connect to the feed's
-  server.
+- **Use a feed from your Broadcastify account.** Type your Broadcastify username and password and
+  press **Load my Broadcastify feeds**: the plugin logs in to Broadcastify (`api.broadcastify.com`,
+  as the Broadcastify appliance does) and lists your feeds under **Your Broadcastify feeds**, a row
+  each (name, feed ID, server, mount). The password isn't kept: it's cleared once they're loaded.
+  **Use this feed** on one adds it with its server, port, mount and source password, or fills in the
+  feed already streaming to that mount (on whichever Broadcastify server it was), and checks that
+  the computer can connect to the feed's server.
 - **It says when the network is in the way.** A city, county, school or company network often blocks
   the login or the stream. Rather than failing, the button says what it ran into: a name the
   network's DNS won't look up, a firewall dropping or refusing the connection, HTTPS intercepted by

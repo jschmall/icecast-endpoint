@@ -29,9 +29,9 @@ Nothing else to install. The MP3 encoder is built in.
    file**, and choose the `icecast-endpoint` program you unpacked.
 2. **Set it up.** Press **Set up** on the plugin's card, then **Add feed**.
    Fill in **Server**, **Port**, **Mount** and **Password**. For a
-   Broadcastify feed, copy each one from your feed's Technical tab, or let the
-   plugin fill them in from your Broadcastify account (see
-   [Filling in a Broadcastify feed](#filling-in-a-broadcastify-feed)).
+   Broadcastify feed, copy each one from your feed's Technical tab, or load
+   your feeds from your Broadcastify account (see
+   [Using a feed from your Broadcastify account](#using-a-feed-from-your-broadcastify-account)).
 3. **Choose what it plays** (optional). Pick a **System**, and under
    **Talkgroups** choose **Every talkgroup**, **Only some** or **All but
    some** (see [Choosing talkgroups](#choosing-talkgroups)). Left as it is,
@@ -152,38 +152,37 @@ software, you can keep the bitrate and sample rate it used.
 A stereo feed may also need to be set up as stereo on Broadcastify's side.
 Check your feed's settings there before you switch an existing mono feed.
 
-#### Filling in a Broadcastify feed
+#### Using a feed from your Broadcastify account
 
-The plugin can fill in a feed's **Server**, **Port**, **Mount** and
-**Password** from your Broadcastify account:
+Rather than copying a feed's **Server**, **Port**, **Mount** and **Password**
+from its Technical tab, load them from your Broadcastify account:
 
 1. Turn the plugin on and start recording (its buttons only work while it
    runs; it runs with no feeds yet).
 2. Type your **Broadcastify username** and **Broadcastify password** (the ones
    you log in to broadcastify.com with) at the bottom of its settings.
-3. Press **Fill in from Broadcastify**.
+3. Press **Load my Broadcastify feeds**. Your account's feeds are listed under
+   **Your Broadcastify feeds**, a row each: its name, feed ID, server and
+   mount. The password is cleared: it isn't kept.
+4. Open the feed to stream to and press **Use this feed**. It's added, or the
+   feed already streaming to that mount gets its server, port and password.
+   Press it on another to add that one too.
 
-It adds the feed, or fills in the one already streaming to that mount, and
-clears the password: it isn't kept. With more than one feed on the account it
-lists them under **Your Broadcastify feeds**, a row each (its name, feed ID,
-server and mount): open the one you want and press **Fill in this feed**. Or put
-its number under **Broadcastify feed ID** (as in its address,
-broadcastify.com/listen/feed/38565) and press **Fill in from Broadcastify**
-again. Then choose its **System** and **Talkgroups**: until you do, it plays
-every call.
+Then choose the feed's **System** and **Talkgroups**: until you do, it plays
+every call. **Use this feed** also checks that this computer can connect to the
+feed's server, and says so if it can't.
 
-Typing the username and password doesn't interrupt the stream: only a change to
-the feeds restarts them.
-
-It also checks that this computer can connect to the feed's server, and says so
-if it can't.
+The list's buttons work until the plugin restarts, and while the feeds are as
+they were when you loaded them; otherwise load them again. Typing the username
+and password doesn't interrupt the stream: only a change to the feeds restarts
+them.
 
 #### On a city, county, school or company network
 
 Networks like these often block what a recorder needs: the login goes to
 `api.broadcastify.com` over HTTPS (port 443), and the stream to your feed's
 server (such as `audio9.broadcastify.com`, port 80). When something on the
-network is in the way, **Fill in from Broadcastify** says what it ran into
+network is in the way, **Load my Broadcastify feeds** says what it ran into
 instead of just failing:
 
 | It says | What's happening |
@@ -236,7 +235,7 @@ longer after each try, up to a minute.
 
 Each feed sends audio of the calls it plays, as MP3, to the server you set.
 With **Show the talkgroup as the title** on, it also sends the talkgroup's name
-and number. **Fill in from Broadcastify** sends your Broadcastify username and
+and number. **Load my Broadcastify feeds** sends your Broadcastify username and
 password to `api.broadcastify.com` (over HTTPS, in the request body), only when
 you press it. Nothing else leaves your computer, and passwords never appear in
 the log.

@@ -30,9 +30,9 @@ use icecast::{Protocol, StreamInfo, Target};
 #[derive(Serialize, Deserialize, JsonSchema, Default, PartialEq)]
 #[serde(default)]
 #[schemars(extend("x-actions" = [{
-    "id": FILL_IN,
-    "label": "Fill in from Broadcastify",
-    "hint": "Logs in with the Broadcastify username and password above and fills in your feed's server, mount and password. The recorder has to be recording."
+    "id": LOAD_FEEDS,
+    "label": "Load my Broadcastify feeds",
+    "hint": "Logs in with the Broadcastify username and password above and lists your account's feeds under Your Broadcastify feeds, each with Use this feed. The password isn't kept. The recorder has to be recording."
 }]))]
 struct Config {
     /// Feeds
@@ -42,21 +42,16 @@ struct Config {
     feeds: Vec<FeedConfig>,
     /// Broadcastify username
     ///
-    /// To fill in a feed from your Broadcastify account: your Broadcastify username and password, then Fill in from Broadcastify. The password is cleared once the feed is filled in.
+    /// To stream to a feed on your Broadcastify account without copying its details: your Broadcastify username and password, then Load my Broadcastify feeds. The password is cleared once your feeds are loaded.
     #[serde(rename = "broadcastifyUsername")]
     broadcastify_username: String,
     /// Broadcastify password
     #[serde(rename = "broadcastifyPassword")]
     #[schemars(extend("x-secret" = true))]
     broadcastify_password: String,
-    /// Broadcastify feed ID
-    ///
-    /// With more than one feed on the account: the one to fill in (its number, as in broadcastify.com/listen/feed/38565).
-    #[serde(rename = "broadcastifyFeedId")]
-    broadcastify_feed_id: Option<u32>,
     /// Your Broadcastify feeds
     ///
-    /// Your account's feeds, listed by Fill in from Broadcastify when it has more than one: open the one to stream and press Fill in this feed.
+    /// Your account's feeds, listed by Load my Broadcastify feeds: open the one to stream and press Use this feed.
     #[serde(rename = "broadcastifyFeeds")]
     #[schemars(extend("readOnly" = true))]
     broadcastify_feeds: Vec<Listed>,
@@ -68,9 +63,9 @@ struct Config {
     broadcastify_api: String,
 }
 
-/// The button that fills in a feed from a Broadcastify account.
-const FILL_IN: &str = "broadcastify";
-/// The button on a feed listed from the account, which fills in that one.
+/// The button that lists a Broadcastify account's feeds.
+const LOAD_FEEDS: &str = "broadcastify";
+/// The button on a feed listed from the account, which adds it (or fills in the one on its mount).
 const USE_FEED: &str = "broadcastify-feed";
 /// How long a press waits for what was typed just before it to be saved: the form saves 300 ms
 /// after the last change, and a save of the plugin's own made first would turn it down.
@@ -84,7 +79,7 @@ const TYPED_WAIT: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 3 })
     "x-summary" = ["Feed {id}", "{server}:{port}{mount}"],
     "x-actions" = [{
         "id": USE_FEED,
-        "label": "Fill in this feed",
+        "label": "Use this feed",
         "hint": "Adds this feed, or fills in the one already streaming to its mount, with its server, port, mount and password."
     }]
 ))]
@@ -107,9 +102,9 @@ impl Listed {
     }
 }
 
-/// The Broadcastify login and feed ID as last saved (the form saves what's typed as it's typed),
+/// The Broadcastify login as last saved (the form saves what's typed as it's typed),
 /// and a signal for each new save.
-type Typed = Arc<(Mutex<(String, String, Option<u32>)>, Condvar)>;
+type Typed = Arc<(Mutex<(String, String)>, Condvar)>;
 
 /// An account's feeds as last looked up, and the settings as they were then: kept in memory only
 /// (they have the feeds' source passwords), so a feed on the list can be filled in.
@@ -393,7 +388,7 @@ struct IcecastEndpoint {
     host: Host,
     /// Where a Broadcastify account's feeds come from.
     api: String,
-    /// Fill in from Broadcastify: the presses being answered, and their replies waiting on a save.
+    /// The Broadcastify buttons: the presses being answered, and their replies waiting on a save.
     workers: Vec<JoinHandle<()>>,
     pending: Pending,
     typed: Typed,
@@ -419,21 +414,19 @@ fn feeds_now(setup: &Setup<Config, trunk_recorder_plugin::NoConfig>) -> FeedsNow
 }
 
 /// What's typed, as the settings have it.
-fn typed_of(c: &Config) -> (String, String, Option<u32>) {
-    (c.broadcastify_username.clone(), c.broadcastify_password.clone(), c.broadcastify_feed_id)
+fn typed_of(c: &Config) -> (String, String) {
+    (c.broadcastify_username.clone(), c.broadcastify_password.clone())
 }
 
 /// What's typed, as a button's value has it.
-fn typed_in(v: &Value) -> (String, String, Option<u32>) {
+fn typed_in(v: &Value) -> (String, String) {
     let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
-    let id =
-        v.get("broadcastifyFeedId").and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))).and_then(|n| u32::try_from(n).ok());
-    (s("broadcastifyUsername"), s("broadcastifyPassword"), id)
+    (s("broadcastifyUsername"), s("broadcastifyPassword"))
 }
 
 /// Wait (a few seconds at most) until what's typed in `want` has been saved: a save of the
 /// plugin's own, made first, would turn the form's down ("changed elsewhere meanwhile").
-fn wait_for_typed(typed: &Typed, want: &(String, String, Option<u32>)) {
+fn wait_for_typed(typed: &Typed, want: &(String, String)) {
     let (m, cv) = &**typed;
     let g = m.lock().unwrap();
     let _ = cv.wait_timeout_while(g, TYPED_WAIT, |now| now != want);
@@ -519,22 +512,20 @@ impl Plugin for IcecastEndpoint {
         Ok(())
     }
 
-    /// Fill in from Broadcastify: on a thread of its own (a login over the internet), answered once
-    /// the feed is saved, or with why it couldn't be.
+    /// Load my Broadcastify feeds, and Use this feed: each on a thread of its own (a login over the
+    /// internet, a connection to the feed's server), answered once its settings are saved, or with
+    /// why they couldn't be.
     fn action(&mut self, a: Action, reply: Reply) {
         let (api, host, pending, typed, account) = (self.api.clone(), self.host.clone(), self.pending.clone(), self.typed.clone(), self.account.clone());
         let (feeds_now, looking) = (self.feeds_now.0.clone(), self.looking.clone());
         let work: Work = match a.action.as_str() {
-            FILL_IN => {
+            LOAD_FEEDS => {
                 // Counted now, on the thread reading messages, so a press on the list after it waits.
                 *looking.0.lock().unwrap() += 1;
                 Box::new(move || {
                     wait_for_typed(&typed, &typed_in(&a.value));
-                    let r = fill_in_from_broadcastify(&api, &a.value);
-                    let r = r.map(|(save, done, by_hand, looked)| {
-                        if let Some(looked) = looked {
-                            *account.lock().unwrap() = Some(looked);
-                        }
+                    let r = load_feeds(&api, &a.value).map(|(save, done, by_hand, looked)| {
+                        *account.lock().unwrap() = Some(looked);
                         (save, done, by_hand)
                     });
                     *looking.0.lock().unwrap() -= 1;
@@ -545,7 +536,13 @@ impl Plugin for IcecastEndpoint {
             USE_FEED => Box::new(move || {
                 let (m, cv) = &*looking;
                 drop(cv.wait_timeout_while(m.lock().unwrap(), Duration::from_secs(12), |n| *n > 0).unwrap());
-                fill_in_listed(&account.lock().unwrap(), &a.value, &feeds_now)
+                let mut account = account.lock().unwrap();
+                let r = use_feed(&account, &a.value, &feeds_now)?;
+                // Another feed can be used next, over the feeds as they'll be.
+                if let Some(a) = account.as_mut() {
+                    a.settings["feeds"] = r.0["feeds"].clone();
+                }
+                Ok(r)
             }),
             other => {
                 reply.fail(format!("There's no button called {other}"));
@@ -771,7 +768,7 @@ fn launch(planned: Vec<Planned>, health: &Health) -> Result<Vec<Route>, String> 
 /// No feeds: said in the log and on the plugin's card (its health), with what to do.
 fn say_if_no_feeds(host: &Host, routes: &[Route]) {
     if routes.is_empty() {
-        let what = "No feeds yet: add one, or fill one in from your Broadcastify account (Fill in from Broadcastify).";
+        let what = "No feeds yet: add one, or load your Broadcastify feeds (Load my Broadcastify feeds) and use one.";
         host.warn(what);
         host.status(State::Warning, what);
     }
@@ -786,62 +783,72 @@ fn api_of(_c: &Config) -> String {
     broadcastify::API.to_string()
 }
 
-/// Fill in from Broadcastify (`value`: the settings as edited): log in and fill in the feed (the
-/// account's only one, or the one under Broadcastify feed ID); with several and none chosen, list
-/// them. Ok: the settings to save, what to say once they're saved, what to say if they can't be,
-/// and the account's feeds when listed (to fill in one from the list). Err: what to tell the user.
-fn fill_in_from_broadcastify(api: &str, value: &Value) -> Result<(Value, String, String, Option<Account>), String> {
-    let (user, password, id) = typed_in(value);
+/// Load my Broadcastify feeds (`value`: the settings as edited): log in and list the account's
+/// feeds. Ok: the settings to save (the list, and the password cleared), what to say once they're
+/// saved, what to say if they can't be, and the account's feeds (kept to use one from the list).
+/// Err: what to tell the user.
+fn load_feeds(api: &str, value: &Value) -> Result<(Value, String, String, Account), String> {
+    let (user, password) = typed_in(value);
     let user = user.trim();
     if user.is_empty() || password.is_empty() {
         return Err("Type your Broadcastify username and password first.".into());
     }
     let feeds = broadcastify::feeds(api, user, &password)?;
-    if id.is_none() && feeds.len() > 1 {
-        let list: Vec<Listed> = feeds.iter().map(Listed::of).collect();
-        let done = format!("This account has {} feeds, listed under Your Broadcastify feeds: open the one to stream and press Fill in this feed.", feeds.len());
-        let by_hand = "Put the one to fill in under Broadcastify feed ID, then press Fill in from Broadcastify again.".to_string();
-        return Ok((json!({ "broadcastifyFeeds": list }), done, by_hand, Some(Account { feeds, settings: value.clone() })));
-    }
-    let f = broadcastify::pick(&feeds, id)?;
-    let (save, done, by_hand) = fill(value, f);
-    Ok((save, done, by_hand, None))
+    let list: Vec<Listed> = feeds.iter().map(Listed::of).collect();
+    let done = match &feeds[..] {
+        [f] => format!(
+            "Found your feed {} ({}), listed under Your Broadcastify feeds: press Use this feed on it to stream to it. Your Broadcastify password wasn't kept.",
+            f.id,
+            f.name.trim()
+        ),
+        _ => format!(
+            "Found {} feeds, listed under Your Broadcastify feeds: open the one to stream to and press Use this feed. Your Broadcastify password wasn't kept.",
+            feeds.len()
+        ),
+    };
+    let names = feeds.iter().map(|f| format!("{} ({})", f.id, f.name.trim())).collect::<Vec<_>>().join(", ");
+    let by_hand = format!(
+        "Your feeds: {names}. Add the one to stream to by hand (its server, mount and password are on its Technical tab at broadcastify.com), and clear the Broadcastify password."
+    );
+    let save = json!({ "broadcastifyFeeds": list, "broadcastifyPassword": null });
+    Ok((save, done, by_hand, Account { feeds, settings: value.clone() }))
 }
 
-/// Fill in a feed from the list (`value`: its item), from the account as last looked up, unless
-/// the feeds have changed since (`now`: as set).
-fn fill_in_listed(account: &Option<Account>, value: &Value, now: &[FeedConfig]) -> Result<(Value, String, String), String> {
-    let again = "Press Fill in from Broadcastify again, then Fill in this feed on the one to stream.";
+/// Use this feed (`value`: its row on the list): from the account as last loaded, unless the feeds
+/// have changed since (`now`: as set).
+fn use_feed(account: &Option<Account>, value: &Value, now: &[FeedConfig]) -> Result<(Value, String, String), String> {
+    let again = "Press Load my Broadcastify feeds again (with your password), then Use this feed.";
     let Some(a) = account else {
-        return Err(format!("The plugin has restarted since your feeds were listed. {again}"));
+        return Err(format!("The plugin has restarted since your feeds were loaded. {again}"));
     };
     let then: Config = serde_json::from_value(json!({ "feeds": a.settings["feeds"] })).unwrap_or_default();
     if then.feeds != now {
-        return Err(format!("The feeds have changed since your Broadcastify feeds were listed. {again}"));
+        return Err(format!("The feeds have changed since your Broadcastify feeds were loaded. {again}"));
     }
-    let id = value.get("id").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok());
+    let Some(id) = value.get("id").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()) else {
+        return Err(format!("That row has no feed ID. {again}"));
+    };
     let f = broadcastify::pick(&a.feeds, id)?;
     Ok(fill(&a.settings, f))
 }
 
-/// The settings (as edited) with `f` filled in, to save with the password and the list cleared;
-/// what to say once saved, and what to say if they can't be.
+/// The settings (as edited) with `f` filled in, to save; what to say once saved, and what to say if
+/// they can't be.
 fn fill(settings: &Value, f: &BcfyFeed) -> (Value, String, String) {
     let (all, added) = broadcastify::fill_in(&settings["feeds"], f);
     let at = format!("{}:{}{}", f.host, f.port, f.mount());
-    let mut done = format!(
-        "{} feed {} ({}) at {at}. It plays every system and talkgroup until you choose (System, Talkgroups). Your Broadcastify password wasn't kept.",
-        if added { "Added" } else { "Filled in" },
-        f.id,
-        f.name.trim()
-    );
+    let mut done = if added {
+        format!("Added feed {} ({}) at {at}. It plays every system and talkgroup until you choose (System, Talkgroups).", f.id, f.name.trim())
+    } else {
+        format!("Filled in the feed streaming to {at} (feed {}, {}) with its server, port and password.", f.id, f.name.trim())
+    };
     // A network that lets the web through may still stop the stream.
     if let Err(why) = broadcastify::reachable(&f.host, f.port) {
         done = format!("{done} But: {why}");
     }
     let by_hand =
         format!("Add it by hand: server {}, port {}, mount {}; its password is on the feed's Technical tab at broadcastify.com.", f.host, f.port, f.mount());
-    (json!({ "feeds": all, "broadcastifyPassword": null, "broadcastifyFeeds": null }), done, by_hand)
+    (json!({ "feeds": all }), done, by_hand)
 }
 
 impl IcecastEndpoint {
@@ -1236,20 +1243,20 @@ mod tests {
         // 0.4.0's lists are read, not shown.
         assert!(p.get("talkgroups").is_none() && p.get("excludeTalkgroups").is_none());
         assert_eq!(f["required"], json!(["server", "mount", "password"]));
-        // Fill in from Broadcastify: the login and which feed, and the button, on the whole settings.
+        // Load my Broadcastify feeds: the login, and the button, on the whole settings.
         let top = &c["properties"];
         assert_eq!(top["broadcastifyPassword"]["x-secret"], true);
-        assert!(top["broadcastifyUsername"].is_object() && top["broadcastifyFeedId"].is_object());
+        assert!(top["broadcastifyUsername"].is_object() && top.get("broadcastifyFeedId").is_none());
         assert!(top.get("broadcastifyApi").is_none(), "for testing only: not on the form");
-        assert_eq!(c["x-actions"][0]["id"], FILL_IN);
-        assert_eq!(c["x-actions"][0]["label"], "Fill in from Broadcastify");
+        assert_eq!(c["x-actions"][0]["id"], LOAD_FEEDS);
+        assert_eq!(c["x-actions"][0]["label"], "Load my Broadcastify feeds");
         // The account's feeds, listed by the plugin: read-only rows, each titled, with its button.
         let list = &top["broadcastifyFeeds"];
         assert_eq!(list["readOnly"], true);
         let item = &list["items"];
         assert_eq!(item["x-title"], "name");
         assert_eq!(item["x-summary"], json!(["Feed {id}", "{server}:{port}{mount}"]));
-        assert_eq!((&item["x-actions"][0]["id"], &item["x-actions"][0]["label"]), (&json!(USE_FEED), &json!("Fill in this feed")));
+        assert_eq!((&item["x-actions"][0]["id"], &item["x-actions"][0]["label"]), (&json!(USE_FEED), &json!("Use this feed")));
     }
 
     /// Broadcastify's API, as the appliance's: an account's feeds for its username and password.
@@ -1268,62 +1275,95 @@ mod tests {
         json!({ "feeds": feeds, "broadcastifyUsername": "me", "broadcastifyPassword": password, "broadcastifyApi": api.url() })
     }
 
-    /// Fill in from Broadcastify: the account's feed is added (or the one on its mount filled in),
-    /// to be saved with the password cleared; a feed server that can't be reached is said.
+    /// Saves of the run, in order.
+    fn saves(out: &testing::Output) -> Vec<Value> {
+        out.messages
+            .iter()
+            .filter_map(|m| if let PluginMessage::SettingsSave { settings, .. } = m { Some(Value::Object(settings.clone())) } else { None })
+            .collect()
+    }
+
+    /// A button's answer.
+    fn answer(out: &testing::Output, request: u64) -> (bool, String) {
+        out.messages
+            .iter()
+            .find_map(|m| if let PluginMessage::ActionResult { request: r, ok, message } = m { (*r == request).then(|| (*ok, message.clone())) } else { None })
+            .expect("an answer")
+    }
+
+    /// Load my Broadcastify feeds: the account's feeds listed (its only one too), the password
+    /// cleared; turned down, or nothing typed in, it says so.
     #[test]
-    fn a_feed_filled_in_from_broadcastify() {
+    fn loading_an_accounts_feeds() {
         let listening = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listening.local_addr().unwrap().port();
         let api = broadcastify_api("127.0.0.1", port);
-        let (save, done, by_hand, listed) = fill_in_from_broadcastify(api.url(), &login(&api, "right", json!([]))).unwrap();
-        assert!(listed.is_none(), "one feed: filled in, not listed");
+        let (save, done, by_hand, account) = load_feeds(api.url(), &login(&api, "right", json!([]))).unwrap();
         assert_eq!(
             save,
-            json!({ "feeds": [{ "name": "Augusta Fire", "server": "127.0.0.1", "port": port, "mount": "/abcd1234", "password": "s3cret" }], "broadcastifyPassword": null, "broadcastifyFeeds": null })
+            json!({ "broadcastifyFeeds": [{ "id": 38565, "name": "Augusta Fire", "server": "127.0.0.1", "port": port, "mount": "/abcd1234" }], "broadcastifyPassword": null }),
+            "the list (no source password), and the password cleared"
         );
-        assert!(done.starts_with(&format!("Added feed 38565 (Augusta Fire) at 127.0.0.1:{port}/abcd1234.")), "{done}");
-        assert!(done.contains("password wasn't kept") && !done.contains("But:"), "{done}");
-        assert!(by_hand.contains("mount /abcd1234") && !by_hand.contains("s3cret"), "{by_hand}");
-        // What's saved makes a good feed (null removes a setting, as the recorder saves it).
+        assert!(done.starts_with("Found your feed 38565 (Augusta Fire)") && done.contains("Use this feed") && done.contains("password wasn't kept"), "{done}");
+        assert!(by_hand.contains("38565 (Augusta Fire)") && !by_hand.contains("s3cret"), "{by_hand}");
+        assert_eq!(account.feeds.len(), 1);
+        assert!(!format!("{account:?}").contains("s3cret"), "its passwords not shown");
+        // What's saved is good settings (null removes a setting, as the recorder saves it).
         let mut kept = save.as_object().unwrap().clone();
         kept.retain(|_, v| !v.is_null());
         let config: Config = serde_json::from_value(Value::Object(kept)).unwrap();
-        assert!(config.feeds[0].target().is_ok() && config.broadcastify_password.is_empty());
-        // Its server not taking connections: filled in, and said why it won't stream.
-        drop(listening);
-        let (_, done, _, _) = fill_in_from_broadcastify(api.url(), &login(&api, "right", json!([]))).unwrap();
-        assert!(done.contains("But: This computer couldn't connect to 127.0.0.1") && done.contains("firewall"), "{done}");
+        assert_eq!(config.broadcastify_feeds[0].id, 38565);
+        assert!(config.broadcastify_password.is_empty());
         // Turned down, or nothing typed in.
-        assert!(fill_in_from_broadcastify(api.url(), &login(&api, "wrong", json!([]))).unwrap_err().contains("didn't accept that username and password"));
-        assert!(
-            fill_in_from_broadcastify(api.url(), &json!({ "broadcastifyUsername": "me" }))
-                .unwrap_err()
-                .contains("Type your Broadcastify username and password")
-        );
+        assert!(load_feeds(api.url(), &login(&api, "wrong", json!([]))).unwrap_err().contains("didn't accept that username and password"));
+        assert!(load_feeds(api.url(), &json!({ "broadcastifyUsername": "me" })).unwrap_err().contains("Type your Broadcastify username and password"));
     }
 
-    /// The button, pressed while recording: the plugin saves the feed it filled in (the password
-    /// cleared), or answers why it couldn't.
+    /// Use this feed: added (or the one on its mount filled in), the password from the account;
+    /// a feed server that can't be reached is said.
     #[test]
-    fn the_fill_in_button() {
+    fn using_a_listed_feed() {
+        let listening = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listening.local_addr().unwrap().port();
+        let api = broadcastify_api("127.0.0.1", port);
+        let (_, _, _, account) = load_feeds(api.url(), &login(&api, "right", json!([]))).unwrap();
+        let account = Some(account);
+        let (save, done, by_hand) = use_feed(&account, &json!({ "id": 38565 }), &[]).unwrap();
+        assert_eq!(save, json!({ "feeds": [{ "name": "Augusta Fire", "server": "127.0.0.1", "port": port, "mount": "/abcd1234", "password": "s3cret" }] }));
+        assert!(done.starts_with(&format!("Added feed 38565 (Augusta Fire) at 127.0.0.1:{port}/abcd1234.")) && !done.contains("But:"), "{done}");
+        assert!(by_hand.contains("mount /abcd1234") && !by_hand.contains("s3cret"), "{by_hand}");
+        let config: Config = serde_json::from_value(save).unwrap();
+        assert!(config.feeds[0].target().is_ok());
+        // Its server not taking connections: filled in, and said why it won't stream.
+        drop(listening);
+        let (_, done, _) = use_feed(&account, &json!({ "id": 38565 }), &[]).unwrap();
+        assert!(done.contains("But: This computer couldn't connect to 127.0.0.1") && done.contains("firewall"), "{done}");
+    }
+
+    /// The buttons, pressed while recording: Load my Broadcastify feeds saves the list (and
+    /// clears the password), Use this feed saves the feed; a wrong login is answered, nothing saved.
+    #[test]
+    fn the_buttons() {
         let listening = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let api = broadcastify_api("127.0.0.1", listening.local_addr().unwrap().port());
         let press = |password: &str| {
-            let hello = HostMessage::Hello(testing::hello(&testing::temp_dir("icecast-endpoint"), json!({ "feeds": [], "broadcastifyApi": api.url() })));
-            let action = HostMessage::Action(Action { request: 7, action: FILL_IN.into(), value: login(&api, password, json!([])) });
-            run(vec![hello, action])
+            let typed = login(&api, password, json!([]));
+            let hello = HostMessage::Hello(testing::hello(&testing::temp_dir("icecast-endpoint"), typed.clone()));
+            let load = HostMessage::Action(Action { request: 7, action: LOAD_FEEDS.into(), value: typed });
+            let pick = HostMessage::Action(Action { request: 8, action: USE_FEED.into(), value: json!({ "id": 38565, "name": "Augusta Fire" }) });
+            run(vec![hello, load, pick])
         };
         let out = press("right");
-        let saved = out.messages.iter().find_map(|m| if let PluginMessage::SettingsSave { settings, .. } = m { Some(settings.clone()) } else { None });
-        let saved = saved.expect("the settings saved");
-        assert_eq!(saved["feeds"][0]["mount"], "/abcd1234");
-        assert_eq!(saved["broadcastifyPassword"], Value::Null);
+        let saved = saves(&out);
+        assert_eq!(saved.len(), 2, "{saved:?}");
+        assert_eq!((saved[0]["broadcastifyFeeds"][0]["id"].clone(), saved[0]["broadcastifyPassword"].clone()), (json!(38565), Value::Null));
+        assert_eq!(saved[1]["feeds"][0]["mount"], "/abcd1234");
         let out = press("wrong");
-        let answer =
-            out.messages.iter().find_map(|m| if let PluginMessage::ActionResult { request: 7, ok, message } = m { Some((*ok, message.clone())) } else { None });
-        let (ok, message) = answer.expect("an answer");
+        let (ok, message) = answer(&out, 7);
         assert!(!ok && message.contains("didn't accept"), "{message}");
-        assert!(!out.messages.iter().any(|m| matches!(m, PluginMessage::SettingsSave { .. })));
+        let (ok, message) = answer(&out, 8);
+        assert!(!ok && message.contains("Press Load my Broadcastify feeds again"), "{message}");
+        assert!(saves(&out).is_empty());
     }
 
     /// "Only some" with the sides' talkgroups listed too (as on a feed set up before sides): each
@@ -1348,74 +1388,64 @@ mod tests {
         })
     }
 
-    /// Several feeds and none chosen: listed in the settings (a row each, with its button), the
-    /// password kept for now; then one on the list is filled in, and the list and password cleared.
+    /// An account with several feeds: each listed; then one used, and another after it (over the
+    /// feeds as the first left them); the feeds changed meanwhile, or the plugin restarted: load again.
     #[test]
-    fn several_feeds_are_listed_to_choose_from() {
+    fn several_feeds_to_choose_from() {
         let listening = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listening.local_addr().unwrap().port();
         let api = two_feeds_api(port);
         let mine = json!([{ "name": "Mine", "server": "x.example", "mount": "/x", "password": "p", "talkgroups": ["101"] }]);
-        let edited = login(&api, "right", mine.clone());
-        let (save, done, _, listed) = fill_in_from_broadcastify(api.url(), &edited).unwrap();
+        let (save, done, _, account) = load_feeds(api.url(), &login(&api, "right", mine.clone())).unwrap();
         assert_eq!(
-            save,
-            json!({ "broadcastifyFeeds": [
+            save["broadcastifyFeeds"],
+            json!([
                 { "id": 38565, "name": "Augusta Fire", "server": "127.0.0.1", "port": port, "mount": "/abcd1234" },
                 { "id": 40001, "name": "Augusta Police", "server": "127.0.0.1", "port": port, "mount": "/efgh5678" }
-            ] }),
-            "the list, and nothing else: no source passwords, the login kept"
+            ])
         );
-        assert!(done.contains("2 feeds, listed under Your Broadcastify feeds") && done.contains("Fill in this feed"), "{done}");
-        let account = listed;
-        assert!(format!("{account:?}").contains("40001") && !format!("{account:?}").contains("other"), "kept, its passwords not shown");
-        // Fill in this feed, on the second: added after the feeds as they were (their old keys kept).
+        assert!(done.starts_with("Found 2 feeds") && done.contains("Use this feed"), "{done}");
+        let mut account = Some(account);
         let saved: Config = serde_json::from_value(json!({ "feeds": mine })).unwrap();
-        let (save, done, _) = fill_in_listed(&account, &json!({ "id": 40001, "name": "Augusta Police" }), &saved.feeds).unwrap();
-        assert_eq!(save["feeds"][0], mine[0], "the others exactly as they were");
-        assert_eq!(save["feeds"][1]["mount"], "/efgh5678");
-        assert_eq!(save["feeds"][1]["password"], "other");
-        assert_eq!((&save["broadcastifyPassword"], &save["broadcastifyFeeds"]), (&Value::Null, &Value::Null));
+        let (save, done, _) = use_feed(&account, &json!({ "id": 40001 }), &saved.feeds).unwrap();
+        assert_eq!(save["feeds"][0], mine[0], "the others exactly as they were (old keys too)");
+        assert_eq!((&save["feeds"][1]["mount"], &save["feeds"][1]["password"]), (&json!("/efgh5678"), &json!("other")));
         assert!(done.starts_with("Added feed 40001 (Augusta Police)"), "{done}");
-        // The feeds changed since they were listed, or the plugin restarted: list them again.
-        let changed: Config = serde_json::from_value(json!({ "feeds": [] })).unwrap();
-        assert!(fill_in_listed(&account, &json!({ "id": 40001 }), &changed.feeds).unwrap_err().contains("changed since"));
-        assert!(fill_in_listed(&None, &json!({ "id": 40001 }), &saved.feeds).unwrap_err().contains("Press Fill in from Broadcastify again"));
-        // A feed ID chosen: filled in directly, not listed.
-        let mut chosen = edited.clone();
-        chosen["broadcastifyFeedId"] = json!(38565);
-        let (save, _, _, listed) = fill_in_from_broadcastify(api.url(), &chosen).unwrap();
-        assert!(listed.is_none());
-        assert_eq!(save["feeds"][1]["mount"], "/abcd1234");
+        // (As the plugin does once one's used.)
+        account.as_mut().unwrap().settings["feeds"] = save["feeds"].clone();
+        let now: Config = serde_json::from_value(json!({ "feeds": save["feeds"] })).unwrap();
+        let (save, _, _) = use_feed(&account, &json!({ "id": 38565 }), &now.feeds).unwrap();
+        assert_eq!(save["feeds"].as_array().map(Vec::len), Some(3), "a second feed added");
+        // Changed since, restarted, a row without its ID, a feed not on the account.
+        assert!(use_feed(&account, &json!({ "id": 40001 }), &[]).unwrap_err().contains("changed since"));
+        assert!(use_feed(&None, &json!({ "id": 40001 }), &[]).unwrap_err().contains("Press Load my Broadcastify feeds again"));
+        assert!(use_feed(&account, &json!({}), &now.feeds).unwrap_err().contains("no feed ID"));
+        assert!(use_feed(&account, &json!({ "id": 7 }), &now.feeds).unwrap_err().contains("no feed 7"));
     }
 
-    /// The list's button, through the plugin: pressed after Fill in from Broadcastify listed the
-    /// feeds, it saves the one chosen.
+    /// Use this feed pressed while the feeds are still loading waits for them; then two used in
+    /// turn, the second over what the first saved.
     #[test]
-    fn the_list_button() {
+    fn use_waits_for_the_list() {
         let listening = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let api = two_feeds_api(listening.local_addr().unwrap().port());
-        let typed = json!({ "feeds": [], "broadcastifyUsername": "me", "broadcastifyPassword": "right", "broadcastifyApi": api.url() });
+        let typed = login(&api, "right", json!([]));
         let hello = HostMessage::Hello(testing::hello(&testing::temp_dir("icecast-endpoint"), typed.clone()));
-        let list = HostMessage::Action(Action { request: 7, action: FILL_IN.into(), value: typed });
-        let pick = HostMessage::Action(Action { request: 8, action: USE_FEED.into(), value: json!({ "id": 40001 }) });
-        let out = run(vec![hello, list, pick]);
-        let saves: Vec<Value> = out
-            .messages
-            .iter()
-            .filter_map(|m| if let PluginMessage::SettingsSave { settings, .. } = m { Some(Value::Object(settings.clone())) } else { None })
-            .collect();
-        assert_eq!(saves.len(), 2, "{saves:?}");
-        assert_eq!(saves[0]["broadcastifyFeeds"].as_array().map(Vec::len), Some(2));
-        assert_eq!(saves[1]["feeds"][0]["mount"], "/efgh5678");
+        let load = HostMessage::Action(Action { request: 7, action: LOAD_FEEDS.into(), value: typed });
+        let one = HostMessage::Action(Action { request: 8, action: USE_FEED.into(), value: json!({ "id": 40001 }) });
+        let out = run(vec![hello, load, one]);
+        let saved = saves(&out);
+        assert_eq!(saved.len(), 2, "{saved:?}");
+        assert_eq!(saved[0]["broadcastifyFeeds"].as_array().map(Vec::len), Some(2));
+        assert_eq!(saved[1]["feeds"][0]["mount"], "/efgh5678");
     }
 
     /// A press waits for what was typed just before it to be saved (the form saves 300 ms after the
     /// last change): it goes on as soon as it is, else after a few seconds.
     #[test]
     fn a_press_waits_for_what_was_typed() {
-        let typed: Typed = Arc::new((Mutex::new((String::new(), String::new(), None)), Condvar::new()));
-        let want = ("me".to_string(), "pw".to_string(), Some(1));
+        let typed: Typed = Arc::new((Mutex::new((String::new(), String::new())), Condvar::new()));
+        let want = ("me".to_string(), "pw".to_string());
         let t = typed.clone();
         let w = want.clone();
         let saver = std::thread::spawn(move || {
@@ -1433,9 +1463,9 @@ mod tests {
         assert!(at.elapsed() < Duration::from_millis(50));
         // Never saved: it gives up and goes on.
         let at = Instant::now();
-        wait_for_typed(&typed, &("other".into(), String::new(), None));
+        wait_for_typed(&typed, &("other".into(), String::new()));
         assert!(at.elapsed() >= TYPED_WAIT);
-        assert_eq!(typed_in(&json!({ "broadcastifyUsername": "me", "broadcastifyPassword": "pw", "broadcastifyFeedId": "1" })), want);
+        assert_eq!(typed_in(&json!({ "broadcastifyUsername": "me", "broadcastifyPassword": "pw" })), want);
     }
 
     /// Settings that leave the feeds as they were (the Broadcastify login typed, the list saved)
@@ -1498,7 +1528,7 @@ mod tests {
     fn no_feeds_yet() {
         let out = run(vec![hello(json!([]))]);
         assert!(out.ready(), "{:?}", out.messages);
-        assert!(out.logs().iter().any(|l| l.1.contains("No feeds yet") && l.1.contains("Fill in from Broadcastify")), "{:?}", out.logs());
+        assert!(out.logs().iter().any(|l| l.1.contains("No feeds yet") && l.1.contains("Load my Broadcastify feeds")), "{:?}", out.logs());
         // And on the plugin's card.
         let (state, message) = out.status().expect("a status");
         assert_eq!(state, State::Warning);
